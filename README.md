@@ -36,7 +36,7 @@ ai-safety/
 │   ├── litellm_client.py          # LiteLLM proxy client (OpenAI-compatible)
 │   ├── prompts1.py                # Updated prompts (improved diversity)
 │   ├── aspi_quality_checker.py    # 7 automated quality checks (QC-1 to QC-7)
-│
+│   │
 └── output/
     ├── aspi_demo_gemini-2.5-pro_10pairs.jsonl
     └── aspi_demo_o3-mini_10pairs.jsonl
