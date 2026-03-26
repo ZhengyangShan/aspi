@@ -42,7 +42,6 @@ ai-safety/
     └── aspi_demo_o3-mini_10pairs.jsonl
 ```
 
-
 ## Setup
 
 ### 1. Install dependencies
@@ -74,9 +73,6 @@ python run_pipeline.py --model gemini/gemini-2.5-pro --suite workspace,slack,tra
 
 # All suites, 50 pairs each
 python run_pipeline.py --model gemini/gemini-2.5-pro --suite all --limit 50
-
-# Resume an interrupted run
-python run_pipeline.py --model gemini/gemini-2.5-pro --suite workspace --resume
 ```
 
 Output is saved to `output/aspi_<model>_<suite>_<n>pairs.jsonl`.
