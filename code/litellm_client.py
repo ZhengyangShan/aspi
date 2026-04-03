@@ -13,6 +13,7 @@ import os
 
 from openai import OpenAI
 from dotenv import load_dotenv
+from tenacity import retry, wait_random_exponential, stop_after_attempt
 
 load_dotenv()
 
@@ -31,6 +32,7 @@ class LiteLlmClient:
         )
         self.model = model
 
+    @retry(wait=wait_random_exponential(min=1, max=120), stop=stop_after_attempt(10))
     def completion_with_backoff(self, **kwargs):
         return self.client.chat.completions.create(**kwargs)
 

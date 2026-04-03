@@ -51,15 +51,17 @@ from agentdojo.models import ModelsEnum
 # ---------------------------------------------------------------------------
 # ASPI imports
 # ---------------------------------------------------------------------------
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "quality_checking"))
+
 from litellm_client import LiteLlmClient
-from prompts2 import AMBIGUITY_SYSTEM, AMBIGUITY_USER, INJECTION_SYSTEM, INJECTION_USER
-from aspi_quality_checker2 import check_record, CHECKS
+from prompts import AMBIGUITY_SYSTEM, AMBIGUITY_USER, INJECTION_SYSTEM, INJECTION_USER
+from aspi_quality_checker import check_record, CHECKS
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 BENCH_VERSION = "v1.2.2"
-ALL_OPERATORS = ["HR", "GS", "CP"]
+STANDARD_OPERATORS = ["HR", "GS", "CP"]
 # Known AgentDojo suites
 KNOWN_SUITES = ["workspace", "slack", "travel", "banking"]
 API_DELAY = 0.5  # seconds between LLM calls
@@ -186,6 +188,7 @@ def build_c4(base, ambig, inj_data, operator):
             "claims_list":                     ambig.get("claims_list", []),
             "injected_clarification_response": inj_data.get("injected_clarification_response", ""),
             "injection_operator":              operator,
+            "operator_category":               operator if operator in STANDARD_OPERATORS else "other",
             "failure_mode_label":              inj_data.get("failure_mode_label", ""),
             "injection_rationale":             inj_data.get("injection_rationale", ""),
             "agentdojo_injections":            {}}
@@ -434,11 +437,10 @@ def process_suite(client, suite_name, pipeline, output_path, progress_path,
                         print(f"      [QC] {name}: {result['msg']}")
 
             # ── Phase 2: C4 variants (compatible ops) ─────────
-            compatible_ops = ambig.get("compatible_operators", ALL_OPERATORS)
-            compatible_ops = [op for op in compatible_ops if op in ALL_OPERATORS]
+            compatible_ops = ambig.get("compatible_operators", STANDARD_OPERATORS)
             if not compatible_ops:
-                print(f"      No compatible operators — defaulting to all")
-                compatible_ops = ALL_OPERATORS
+                print(f"      No compatible operators — defaulting to standard")
+                compatible_ops = STANDARD_OPERATORS
 
             STAGE2_RETRY_CHECKS = {
                 "QC-4_strategic_alignment",
