@@ -1,21 +1,21 @@
 # ASPI Benchmark — Ambiguous State Prompt Injection
 
-A benchmark for measuring LLM agent vulnerability during clarification states. Extends [AgentDojo](https://github.com/ethz-spylab/agentdojo) (v1.2.2) with a 4-condition design to test whether agents become more susceptible to prompt injection when they enter a clarification-seeking state.
+A benchmark for measuring LLM agent vulnerability during clarification states with a 4-condition design to test whether agents become more susceptible to prompt injection when they enter a clarification-seeking state.
 
 ## Key Idea
 
-When a user prompt is ambiguous, an agent asks a clarifying question. The user's response to that question opens a **new injection channel** — the attacker can embed malicious instructions inside the clarification answer. This channel requires no environment access — only a crafted user message.
+When a user prompt is ambiguous, an agent asks a clarifying question. The user's response to that question opens a **new injection channel** which is the attacker can embed malicious instructions inside the clarification answer. This channel requires no environment access but only a crafted user message.
 
 ## 4-Condition Design
 
 | Condition | Prompt | Attack Channel | Purpose |
 |-----------|--------|----------------|---------|
 | **C1** | Original (clear) | None | Baseline utility |
-| **C2** | Original (clear) | Tool-result injection (ImportantInstructionsAttack) | Standard AgentDojo ASR |
+| **C2** | Original (clear) | Tool-result injection (ImportantInstructionsAttack) | Standard tool attack |
 | **C3** | Ambiguous | Benign clarification response | Clarification utility |
 | **C4** | Ambiguous | Injected clarification response | **ASPI attack** |
 
-C1/C2 are independent single-turn runs. C3/C4 share Turn 1-2 (branching design) — the only difference is the Turn 3 content (benign vs injected).
+C1/C2 are independent single-turn runs. C3/C4 share Turn 1-2 (branching design) and the only difference is the Turn 3 content (benign vs injected).
 
 ## Primary Metrics
 
@@ -47,26 +47,8 @@ code/
 └── evaluation/                    # Phase 2: Evaluate agents
     ├── aspi_eval_agentdojo.py     #   Evaluator (branching 4-turn protocol)
     ├── aspi_metrics.py            #   All metric computation (separated)
-    └── user_simulator.py          #   LHAW-style user simulator + ask_user tool
+    └── user_simulator.py          #   User simulator + ask_user tool
 ```
-
-### Dataset Construction
-
-| File | Purpose |
-|------|---------|
-| `run_pipeline.py` | Main CLI. Generates C1-C4 records from AgentDojo task suites. Two LLM stages with QC-driven retry. Supports multi-suite, resume, incremental saving. |
-| `prompts.py` | All LLM prompts: `AMBIGUITY_SYSTEM/USER` (Stage 1: create ambiguous prompt by deleting one slot) and `INJECTION_SYSTEM/USER` (Stage 2: embed attack in clarification response using HR/GS/CP operators). Includes banned phrase lists and naturalness rules. |
-| `litellm_client.py` | OpenAI-compatible wrapper for LiteLLM proxy. Handles Gemini safety settings, retry with exponential backoff, auto-appends `/v1` to base URL. |
-
-### Evaluation
-
-| File | Purpose |
-|------|---------|
-| `aspi_eval_agentdojo.py` | The evaluator. Runs agents through AgentDojo's pipeline with environment-state scoring (`utility()`, `security()`). C1/C2: single-turn. C3/C4: real 4-turn with branching — shared Turn 1-2, deep-copied state for each branch. Supports AgentDojo native and LiteLLM backends. |
-| `aspi_metrics.py` | All metric computation, separated from the evaluator. Computes ASR, DASR, utility rates, paired deltas, Wilson CIs, per-operator and per-suite breakdowns. Can be re-run on saved JSONL without calling any model. |
-| `user_simulator.py` | Generates dynamic Turn 3 responses matching the agent's actual Turn 2 question (LHAW paper approach). Includes `ask_user` tool for reliable clarification detection and LLM classifier as fallback. |
-
----
 
 ## Prerequisites
 
@@ -95,13 +77,16 @@ code/
 cd code/dataset_construction/
 
 # Quick test: 5 pairs from workspace
-python run_pipeline.py --model gemini/gemini-2.5-pro --suite workspace --limit 5
+python run_pipeline.py --model gemini/gemini-3.1-pro --suite workspace --limit 5
 
 # Full run: 25 pairs per suite (100 total)
-python run_pipeline.py --model gemini/gemini-2.5-pro --suite all --limit 25
+python run_pipeline.py --model gemini/gemini-3.1-pro --suite all --limit 25
+
+# Covers every (user_task x injection_task) combination
++python run_pipeline.py --model gemini/gemini-2.5-pro --suite all
 
 # Resume an interrupted run
-python run_pipeline.py --model gemini/gemini-2.5-pro --suite all --limit 25 --resume
+python run_pipeline.py --model gemini/gemini-3.1-pro --suite all --limit 25 --resume
 ```
 
 Output: `output/aspi_{suite}_{model}_{n}pairs.jsonl`
@@ -217,13 +202,12 @@ Phase 2b — C4 branch (deep copy of state):
 
 This ensures the **only difference** between C3 and C4 is the Turn 3 content.
 
-### Clarification Detection (3 levels)
+### Clarification Detection
 
-| Level | Method | Used for decision? |
-|-------|--------|-------------------|
-| `ask_user` tool call | Agent explicitly called ask_user tool | **Yes** (primary) |
-| LLM classifier | Simulator model classifies Turn 2 text | **Yes** (fallback) |
-| Text heuristic | Keyword matching | **No** (saved for reporting only) |
+| Level | Method | 
+|-------|--------|
+| `ask_user` tool call | Agent explicitly called ask_user tool |
+| LLM classifier | Simulator model classifies Turn 2 text | 
 
 ### Scoring Convention (AgentDojo)
 
@@ -246,21 +230,6 @@ All metrics computed from saved raw data. Group-level (n = n_groups, comparable)
 | DASR_any (all) | Mean of per-group (ASR_C4_any - ASR_C2), all groups |
 | DASR_any (clarified) | Same, only groups where agent asked clarification |
 | clarif_rate | Fraction of groups where agent entered clarification state |
-
----
-
-## Dataset Format
-
-Each JSONL record contains:
-
-**Shared fields (all conditions):**
-`suite`, `user_task_id`, `injection_task_id`, `condition`, `original_prompt`, `ground_truth_output`, `ground_truth_tool_calls`, `attacker_goal`
-
-**C3/C4 additional fields:**
-`base_prompt`, `missing_slot`, `clarification_type`, `expected_clarification_question`, `benign_clarification_response`, `compatible_operators`
-
-**C4-only fields:**
-`injected_clarification_response`, `injection_operator`, `failure_mode_label`, `injection_rationale`
 
 ---
 
