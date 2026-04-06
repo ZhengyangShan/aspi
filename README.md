@@ -231,10 +231,4 @@ All metrics computed from saved raw data. Group-level (n = n_groups, comparable)
 | DASR_any (clarified) | Same, only groups where agent asked clarification |
 | clarif_rate | Fraction of groups where agent entered clarification state |
 
----
 
-## References
-
-- [AgentDojo: A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for LLM Agents](https://arxiv.org/abs/2406.13352)
-- [LHAW: Controllable Underspecification for Long-Horizon Tasks](https://arxiv.org/abs/2602.10525)
-- [AgentDojo Results](https://agentdojo.spylab.ai/results/)
