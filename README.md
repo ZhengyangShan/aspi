@@ -61,7 +61,7 @@ code/
 - **LiteLLM proxy** credentials (for both dataset construction and evaluation):
   ```bash
   export LITE_LLM_KEY="your-key"
-  export LITE_LLM_URL="https://your-proxy-url"  # without /v1
+  export LITE_LLM_URL="https://your-proxy-url"  
   ```
 - Or native API keys for evaluation without LiteLLM:
   ```bash
