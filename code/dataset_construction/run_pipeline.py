@@ -6,22 +6,6 @@ ASPI Dataset Construction Pipeline — CLI Script
 Generates the ASPI benchmark dataset from AgentDojo task pairs.
 Routes LLM calls through a LiteLLM proxy.
 
-Usage:
-    # Basic — 10 pairs from workspace suite
-    python run_pipeline.py --model gemini/gemini-2.5-pro --limit 10
-
-    # Full workspace suite
-    python run_pipeline.py --model gemini/gemini-2.5-pro --suite workspace
-
-    # Multiple suites
-    python run_pipeline.py --model gemini/gemini-2.5-pro --suite workspace,slack,travel
-
-    # All suites, 50 pairs each
-    python run_pipeline.py --model gemini/gemini-2.5-pro --suite all --limit 50
-
-    # Resume interrupted run (reads progress file)
-    python run_pipeline.py --model gemini/gemini-2.5-pro --suite workspace --resume
-
 Required environment variables (in .env or exported):
     LITE_LLM_KEY  — API key for the LiteLLM proxy
     LITE_LLM_URL  — Base URL of the LiteLLM proxy (without /v1)
