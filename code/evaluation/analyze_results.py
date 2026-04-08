@@ -49,7 +49,7 @@ import numpy as np
 sys.path.insert(0, ".")
 sys.path.insert(0, str(Path(__file__).parent))
 
-from aspi_metrics import aggregate, rate_with_ci, attack_attempted_rule, utility_attempted_rule
+from aspi_metrics import aggregate, rate_with_ci
 
 RESULTS_DIR = Path("ouput_analysis")
 PLOT_DIR = Path("eval_plots")
