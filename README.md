@@ -75,7 +75,7 @@ code/
 
 ## Quick Start
 
-### 1. Generate Dataset
+### Step 1. Generate Dataset
 
 ```bash
 cd code/dataset_construction/
