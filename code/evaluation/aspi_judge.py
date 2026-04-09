@@ -402,5 +402,54 @@ class ASPIJudge:
                 judge_result = self.judge_group(result)
                 result["judge"] = judge_result
                 out.write(json.dumps(result) + "\n")
+                out.flush()
+
+                # Print first complete example
+                if i == 0:
+                    print(f"\n{'='*70}")
+                    print(f"  EXAMPLE: [{result.get('suite','?')}] "
+                          f"{result.get('user_task_id','?')} x {result.get('injection_task_id','?')}")
+                    print(f"{'='*70}")
+                    print(f"  Goal:    {result.get('attacker_goal','')[:150]}")
+                    print(f"  Prompt:  {result.get('original_prompt','')[:150]}")
+
+                    # C2 attack
+                    ja = judge_result.get("c2_judge_attack", {})
+                    ju = judge_result.get("c2_judge_utility", {})
+                    c2 = result.get("c2", {})
+                    print(f"\n  --- C2 ---")
+                    print(f"  Tools:   {[t.get('function','?') for t in c2.get('tool_calls',[])]}")
+                    print(f"  Output:  {(c2.get('model_output','') or '')[:150]}")
+                    print(f"  Env:     security={c2.get('security')}  utility={c2.get('utility')}")
+                    print(f"  Attack:  {ja.get('classification')}  reason={ja.get('compliance_reason','--')}")
+                    print(f"           {ja.get('reasoning','')[:150]}")
+                    print(f"  Utility: {ju.get('classification')}")
+                    print(f"           {ju.get('reasoning','')[:150]}")
+
+                    # C4_tool
+                    c4t_ja = judge_result.get("c4_tool_judge_attack", {})
+                    if c4t_ja:
+                        c4t = result.get("c4_tool", {})
+                        print(f"\n  --- C4_tool ---")
+                        print(f"  Env:     security={c4t.get('security')}  utility={c4t.get('utility')}")
+                        print(f"  Attack:  {c4t_ja.get('classification')}  reason={c4t_ja.get('compliance_reason','--')}")
+
+                    # C4_user (first variant)
+                    c4u_judges = judge_result.get("c4_user_judges", [])
+                    c4u_variants = result.get("c4_user_variants", result.get("c4_variants", []))
+                    for vi, vj in enumerate(c4u_judges):
+                        if vj.get("skipped"):
+                            continue
+                        v = c4u_variants[vi] if vi < len(c4u_variants) else {}
+                        vja = vj.get("judge_attack", {})
+                        print(f"\n  --- C4_user/{v.get('injection_operator','?')} ---")
+                        print(f"  Turn 3:  {(v.get('turn3_text','') or '')[:150]}")
+                        print(f"  Tools:   {[t.get('function','?') for t in v.get('tool_calls',[])]}")
+                        print(f"  Env:     security={v.get('security')}  utility={v.get('utility')}")
+                        print(f"  Attack:  {vja.get('classification')}  reason={vja.get('compliance_reason','--')}")
+                        print(f"           {vja.get('reasoning','')[:150]}")
+                        break  # only first variant
+
+                    print(f"{'='*70}\n")
 
         print(f"Done. Annotated results saved to {output_path}")
