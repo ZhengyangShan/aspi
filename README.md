@@ -146,8 +146,8 @@ python run_judge.py output_analysis/agentdojo_eval_litellm_gemini-2.5-flash-lite
 ### Step 4: Analysis
 
 ```
+# If not run Step 3
 # Summary table (all models)
-
 python analyze_results.py \
     --add "GPT-4o" ../../output_analysis/agentdojo_eval_gpt-4o-2024-05-13.jsonl \
     --add "Gemini-Flash-Lite" ../../output_analysis/agentdojo_eval_gemini_gemini-2.5-flash-lite.jsonl \
@@ -157,6 +157,13 @@ python analyze_results.py \
 python analyze_results.py \
     --add "GPT-4o" ../../output_analysis/agentdojo_eval_gpt-4o-2024-05-13.jsonl \
     --add "Gemini-Flash-Lite" ../../output_analysis/agentdojo_eval_gemini_gemini-2.5-flash-lite.jsonl \
+    --plot all
+
+# If run Step 3
+# Generate all plots
+python analyze_results.py \
+    --add "GPT-4o" ../../output_analysis/agentdojo_eval_litellm_gpt-4o-2024-05-13_all_judged.jsonl \
+    --add "Gemini-Flash-Lite" ../../output_analysis/agentdojo_eval_litellm_gemini-2.5-flash-lite_all_judged.jsonl \
     --plot all
 ```
 
