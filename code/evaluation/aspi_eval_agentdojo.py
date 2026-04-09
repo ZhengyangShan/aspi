@@ -1008,7 +1008,8 @@ def load_grouped_file(
 # Import aggregate from aspi_metrics.py (single source of truth for metrics).
 # Kept here for backward compatibility — callers can still do:
 #   from aspi_eval_agentdojo import aggregate
-from aspi_metrics import aggregate, rate_with_ci  # noqa: F401
+# Metrics computed offline in Step 4 (analyze_results.py), not here.
+# from aspi_metrics import aggregate, rate_with_ci
 
 
 def _aggregate_legacy(results: list[dict]) -> dict:
@@ -1425,127 +1426,81 @@ def main():
 
     elapsed = time.time() - t_start
 
-    # ── Compute summary ───────────────────────────────────────────────
-    summary = aggregate(all_results)
-    summary["model"] = args.model
-    summary["defense"] = args.defense
-    summary["elapsed_seconds"] = round(elapsed, 1)
-    summary["total_api_calls"] = total_api_calls
+    # ── Simple counts (no aggregate — metrics computed in Step 4) ────
+    def _get_c4v(res):
+        return res.get("c4_user_variants", res.get("c4_variants", []))
+
+    n_groups = len(all_results)
+    n_clarified = sum(
+        1 for r in all_results
+        if r.get("clarification", {}).get("clarification_detected")
+    )
+    n_c4_skipped = sum(1 for r in all_results if r.get("c4_skipped", False))
+    n_c4_tool = sum(
+        1 for r in all_results
+        if "c4_tool" in r and not r.get("c4_tool", {}).get("skipped", True)
+    )
+    n_c4_user = sum(
+        len([v for v in _get_c4v(r) if not v.get("skipped")])
+        for r in all_results
+    )
+
+    # Simple pass counts (not rates — rates computed in analyze_results.py)
+    u_c1 = sum(r["c1"]["utility"] for r in all_results)
+    u_c2 = sum(r["c2"]["utility"] for r in all_results)
+    u_c3 = sum(r["c3"]["utility"] for r in all_results)
+    asr_c2 = sum(r["c2"]["security"] for r in all_results)
+
+    # Save lightweight summary (just counts + metadata, no metric computation)
+    run_summary = {
+        "model": args.model,
+        "defense": args.defense,
+        "n_groups": n_groups,
+        "n_clarified": n_clarified,
+        "n_c4_skipped": n_c4_skipped,
+        "n_c4_tool_run": n_c4_tool,
+        "n_c4_user_variants": n_c4_user,
+        "elapsed_seconds": round(elapsed, 1),
+        "total_api_calls": total_api_calls,
+        "counts": {
+            "u_c1": u_c1, "u_c2": u_c2, "u_c3": u_c3,
+            "asr_c2": asr_c2,
+        },
+    }
     if group_times:
-        summary["avg_seconds_per_group"] = round(
+        run_summary["avg_seconds_per_group"] = round(
             sum(group_times) / len(group_times), 1,
         )
 
     with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2)
+        json.dump(run_summary, f, indent=2)
 
-    # ── Print results table ───────────────────────────────────────────
-    def fmt(metric: dict) -> str:
-        if metric.get("rate") is None:
-            return "n/a"
-        r = metric["rate"]
-        lo, hi = metric.get("ci_low", 0), metric.get("ci_high", 1)
-        return f"{r:.1%} [{lo:.1%}, {hi:.1%}]"
-
+    # ── Print end-of-run summary ─────────────────────────────────────
     print(f"\n{'='*70}")
-    print(f"ASPI Evaluation -- AgentDojo env-state scoring (real 4-turn)")
+    print(f"ASPI Evaluation Complete")
     print(f"Model: {args.model} | Defense: {args.defense or 'none'}")
     print(f"{'='*70}")
-    print(f"  Groups: {summary['n_groups']}  |  "
-          f"C4 run: {summary['n_c4_run']}  |  "
-          f"C4 skipped: {summary['n_c4_skipped']} (no clarification)")
-    print(f"  Total time:  {elapsed:.1f}s  |  API calls: ~{total_api_calls}")
+    print(f"  Groups:          {n_groups}")
+    print(f"  Clarified:       {n_clarified}/{n_groups} ({n_clarified/n_groups:.0%})" if n_groups else "")
+    print(f"  C4 skipped:      {n_c4_skipped} (no clarification)")
+    print(f"  C4_tool run:     {n_c4_tool}")
+    print(f"  C4_user variants:{n_c4_user}")
+    print(f"  Total time:      {elapsed:.1f}s  |  API calls: ~{total_api_calls}")
     if group_times:
         avg_t = sum(group_times) / len(group_times)
-        min_t = min(group_times)
-        max_t = max(group_times)
-        print(f"  Per group:   avg={avg_t:.1f}s  min={min_t:.1f}s  max={max_t:.1f}s")
+        print(f"  Per group:       avg={avg_t:.1f}s  min={min(group_times):.1f}s  max={max(group_times):.1f}s")
 
-    print(f"\n  {'Metric':<25} {'Rate [95% CI]':>30}")
-    print(f"  {'-'*57}")
-    print(f"  {'u(C1)':<25} {fmt(summary['u_c1']):>30}")
-    print(f"  {'u(C2)':<25} {fmt(summary['u_c2']):>30}")
-    print(f"  {'ASR(C2)':<25} {fmt(summary['asr_c2']):>30}")
-    print(f"  {'clarif_rate':<25} {fmt(summary['clarif_rate']):>30}")
-    print(f"  {'u(C3)':<25} {fmt(summary['u_c3']):>30}")
-    print(f"  {'ASR(C4) [run only]':<25} {fmt(summary['asr_c4']):>30}")
-    print(f"  {'u(C4) [run only]':<25} {fmt(summary['u_c4']):>30}")
-    print(f"  {'ASR(C4_any)':<25} {fmt(summary['c4_any_attack_success']):>30}")
+    print(f"\n  Raw counts (run analyze_results.py for full metrics):")
+    print(f"    u(C1):   {u_c1}/{n_groups}")
+    print(f"    u(C2):   {u_c2}/{n_groups}")
+    print(f"    u(C3):   {u_c3}/{n_groups}")
+    print(f"    ASR(C2): {asr_c2}/{n_groups}")
 
-    # Primary metrics: paired DASR (mean of per-group deltas)
-    da_any = summary.get("delta_asr_any")
-    da_mean = summary.get("delta_asr_mean")
-    if da_any is not None:
-        s1 = "+" if da_any > 0 else ""
-        s2 = "+" if da_mean > 0 else ""
-        print(f"\n  DASR_any  = {s1}{da_any:.4f}  (all groups, n={summary['n_groups']})")
-        print(f"  DASR_mean = {s2}{da_mean:.4f}  (all groups, n={summary['n_groups']})")
-
-    # Conditional metrics: only groups where agent asked clarification
-    n_cl = summary.get("n_clarified", 0)
-    asr_c2_c = summary.get("asr_c2_cond", {})
-    da_any_c = summary.get("delta_asr_any_cond")
-    da_mean_c = summary.get("delta_asr_mean_cond")
-    if da_any_c is not None and n_cl > 0:
-        s3 = "+" if da_any_c > 0 else ""
-        s4 = "+" if da_mean_c > 0 else ""
-        asr_c2_c_str = fmt(asr_c2_c) if isinstance(asr_c2_c, dict) else "n/a"
-        print(f"\n  Clarified-only (n={n_cl}):")
-        print(f"    ASR(C2)   = {asr_c2_c_str}")
-        print(f"    DASR_any  = {s3}{da_any_c:.4f}")
-        print(f"    DASR_mean = {s4}{da_mean_c:.4f}")
-        if da_any_c > 0:
-            print(f"  --> H1: Clarification state INCREASES vulnerability")
-        elif da_any_c < 0:
-            print(f"  --> H1: Clarification state DECREASES vulnerability")
-        else:
-            print(f"  --> H1: Vulnerability is state-agnostic")
-    elif n_cl == 0:
-        print(f"\n  DASR (clarified only): n/a (agent never asked clarification)")
-
-    # Utility deltas
-    du_cl = summary.get("delta_u_clarif")
-    du_c2 = summary.get("delta_u_inject_c2")
-    du_c4 = summary.get("delta_u_inject_c4")
-    if du_cl is not None:
-        s_cl = "+" if du_cl > 0 else ""
-        s_c2 = "+" if du_c2 > 0 else ""
-        s_c4 = "+" if du_c4 > 0 else ""
-        print(f"\n  Utility deltas (mean of per-group paired differences):")
-        print(f"    u(C3)-u(C1) = {s_cl}{du_cl:.4f}  (clarification effect)")
-        print(f"    u(C2)-u(C1) = {s_c2}{du_c2:.4f}  (tool-injection effect)")
-        print(f"    u(C4)-u(C3) = {s_c4}{du_c4:.4f}  (clarif-injection effect)")
-
-    if summary["by_operator"]:
-        print(f"\n  DASR by injection operator:")
-        for op, m in summary["by_operator"].items():
-            sign = "+" if m["delta_asr"] > 0 else ""
-            print(
-                f"    {op:<5} n={m['asr_c4']['n']:>3}  "
-                f"ASR(C4)={fmt(m['asr_c4']):>25}  "
-                f"DASR={sign}{m['delta_asr']:.4f}"
-            )
-
-    if summary["by_suite"]:
-        print(f"\n  Per suite:")
-        for s, m in summary["by_suite"].items():
-            s1 = "+" if m["delta_asr_any"] > 0 else ""
-            s2 = "+" if m["delta_asr_mean"] > 0 else ""
-            a4_str = (
-                f"{m['asr_c4']['rate']:.0%}"
-                if m['asr_c4']['rate'] is not None else "--"
-            )
-            print(
-                f"    {s:<12} groups={m['n_groups']:>3}  "
-                f"clarif={m['clarif_rate']['rate']:.0%}  "
-                f"ASR(C2)={m['asr_c2']['rate']:.0%}  "
-                f"ASR(C4)={a4_str}  "
-                f"DASR_any={s1}{m['delta_asr_any']:.4f}  "
-                f"DASR_mean={s2}{m['delta_asr_mean']:.4f}"
-            )
-
-    print(f"\n  Results : {results_path}")
-    print(f"  Summary : {summary_path}")
+    print(f"\n  Results:  {results_path}")
+    print(f"  Summary:  {summary_path}")
+    print(f"\n  Next steps:")
+    print(f"    python run_judge.py {results_path}                    # Step 3: LLM judge")
+    print(f"    python analyze_results.py --add \"{args.model}\" {results_path} --summary  # Step 4: metrics")
 
 
 if __name__ == "__main__":
