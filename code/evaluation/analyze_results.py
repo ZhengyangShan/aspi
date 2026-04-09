@@ -650,15 +650,16 @@ def plot_agreement(all_data, save_dir):
         print("No judged data for agreement plot"); return
 
     fig, axes = plt.subplots(len(judged_models), 1,
-                             figsize=(6, 2.5 * len(judged_models) + 1), squeeze=False)
+                             figsize=(7, 3 * len(judged_models) + 1), squeeze=False)
 
     for mi, m in enumerate(judged_models):
         ax = axes[mi][0]
         results = all_data[m]["results"]
         judged = [r for r in results if "judge" in r]
 
-        # Compute agreement for C2 and C4_user
+        # Compute agreement for C2, C4_tool, C4_user
         pairs = {"C2": {"env_rule": [], "env_judge": [], "rule_judge": []},
+                 "C4_tool": {"env_rule": [], "env_judge": [], "rule_judge": []},
                  "C4_user": {"env_rule": [], "env_judge": [], "rule_judge": []}}
 
         for res in judged:
@@ -674,11 +675,23 @@ def plot_agreement(all_data, save_dir):
             pairs["C2"]["env_judge"].append(env == judge)
             pairs["C2"]["rule_judge"].append(rule == judge)
 
+            # C4_tool
+            c4t = res.get("c4_tool", {})
+            c4t_j = res["judge"].get("c4_tool_judge_attack", {})
+            if c4t and not c4t.get("skipped") and c4t_j:
+                env_t = c4t.get("security", False)
+                rule_t = attack_attempted_rule(
+                    c4t.get("tool_calls", []), goal, c4t.get("model_output", "")
+                )["attack_attempted"]
+                judge_t = c4t_j.get("attack_attempted", False)
+                pairs["C4_tool"]["env_rule"].append(env_t == rule_t)
+                pairs["C4_tool"]["env_judge"].append(env_t == judge_t)
+                pairs["C4_tool"]["rule_judge"].append(rule_t == judge_t)
+
             # C4_user
             for vj in res["judge"].get("c4_user_judges", []):
                 if vj.get("skipped"): continue
                 ja = vj.get("judge_attack", {})
-                # Find matching variant
                 op = vj.get("injection_operator", "")
                 for v in _get_c4v(res):
                     if v.get("injection_operator") == op and not v.get("skipped"):
@@ -692,31 +705,36 @@ def plot_agreement(all_data, save_dir):
                         pairs["C4_user"]["rule_judge"].append(rule_v == judge_v)
                         break
 
-        # Build matrix: rows=conditions, cols=comparisons
-        row_labels = ["C2", "C4_user"]
+        # Build matrix: include C4_tool only if data exists
+        row_labels = ["C2"]
+        if pairs["C4_tool"]["env_rule"]:
+            row_labels.append("C4_tool")
+        row_labels.append("C4_user")
         col_labels = ["Env vs Rule", "Env vs Judge", "Rule vs Judge"]
-        matrix = np.zeros((2, 3))
+        matrix = np.zeros((len(row_labels), 3))
         for ri, cond in enumerate(row_labels):
             for ci_idx, comp in enumerate(["env_rule", "env_judge", "rule_judge"]):
                 vals = pairs[cond][comp]
                 matrix[ri, ci_idx] = sum(vals) / len(vals) if vals else 0
 
+        n_rows = len(row_labels)
         im = ax.imshow(matrix, cmap="RdYlGn", vmin=0.5, vmax=1.0, aspect="auto")
         ax.set_xticks(range(3)); ax.set_xticklabels(col_labels, fontsize=9)
-        ax.set_yticks(range(2)); ax.set_yticklabels(row_labels, fontsize=10)
+        ax.set_yticks(range(n_rows)); ax.set_yticklabels(row_labels, fontsize=10)
         ax.set_title(m, fontsize=11)
 
         # Annotate cells
-        for ri in range(2):
+        for ri in range(n_rows):
             for ci_idx in range(3):
                 v = matrix[ri, ci_idx]
                 color = "white" if v < 0.7 else "black"
                 ax.text(ci_idx, ri, f"{v:.0%}", ha="center", va="center",
                         fontsize=12, fontweight="bold", color=color)
 
-    fig.suptitle("Metric Agreement (attack detection)", fontsize=13)
-    fig.colorbar(im, ax=axes, shrink=0.6, label="Agreement rate")
-    fig.subplots_adjust(hspace=0.4, top=0.88)
+    fig.suptitle("Metric Agreement (attack detection)", fontsize=13, y=0.98)
+    cbar = fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.5, pad=0.08,
+                        label="Agreement rate")
+    fig.subplots_adjust(hspace=0.5, top=0.90)
     out = save_dir / "aspi_agreement.png"
     plt.savefig(out, dpi=150, bbox_inches="tight"); plt.close()
     print(f"Saved: {out}")
