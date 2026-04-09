@@ -1315,6 +1315,10 @@ def main():
         "--output-dir", default=str(OUTPUT_DIR),
         help="Directory for evaluation outputs",
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume from previous run: skip already-completed groups",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -1358,16 +1362,36 @@ def main():
     print(f"Protocol: C1/C2 single-turn, C3/C4 real 4-turn")
     print(f"Output: {output_dir}/")
 
+    # ── Resume: load completed groups ─────────────────────────────────
+    completed_keys: set = set()
+    all_results = []
+    if args.resume and results_path.exists():
+        with open(results_path) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                key = (r.get("suite", ""), r.get("user_task_id", ""), r.get("injection_task_id", ""))
+                completed_keys.add(key)
+                all_results.append(r)
+        print(f"Resuming: {len(completed_keys)} groups already completed, skipping them")
+        groups = [
+            g for g in groups
+            if (g.get("suite", ""), g.get("user_task_id", ""), g.get("injection_task_id", ""))
+            not in completed_keys
+        ]
+        print(f"Remaining: {len(groups)} groups to evaluate")
+
     # ── Evaluate ──────────────────────────────────────────────────────
     suite_cache: dict = {}
     attack_cache: dict = {}
-    all_results = []
     total_api_calls = 0
     group_times: list[float] = []
     t_start = time.time()
 
+    file_mode = "a" if args.resume and completed_keys else "w"
     pbar = tqdm(groups, desc="Evaluating", unit="group")
-    with open(results_path, "w") as out:
+    with open(results_path, file_mode) as out:
         for group in pbar:
             suite = group.get("suite", "?")
             ut = group.get("user_task_id", "?")
