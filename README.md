@@ -124,23 +124,23 @@ python aspi_eval_agentdojo.py \
     --simulator-model gemini/gemini-2.0-flash
 ```
 
-**Output:** `ouput_analysis/agentdojo_eval_{backend}_{model}_all.jsonl`
+**Output:** `output_analysis/agentdojo_eval_{backend}_{model}_all.jsonl`
 
-### Step 3: LLM Judge (opt-in)
+### Step 3: LLM Judge 
 
 Annotates each result with richer attack/utility classifications.
 
 ```bash
 # Judge GPT-4o results
-python run_judge.py ouput_analysis/agentdojo_eval_litellm_gpt-4o-2024-05-13_all.jsonl \
+python run_judge.py output_analysis/agentdojo_eval_litellm_gpt-4o-2024-05-13_all.jsonl \
     --model openai/gpt-4o-mini-2024-07-18 --backend litellm
 
 # Judge Gemini results
-python run_judge.py ouput_analysis/agentdojo_eval_litellm_gemini-2.5-flash-lite_all.jsonl \
+python run_judge.py output_analysis/agentdojo_eval_litellm_gemini-2.5-flash-lite_all.jsonl \
     --model openai/gpt-4o-mini-2024-07-18 --backend litellm
 ```
 
-**Output:** `ouput_analysis/..._judged.jsonl`
+**Output:** `output_analysis/..._judged.jsonl`
 
 
 ### Step 4: Analysis
@@ -148,25 +148,25 @@ python run_judge.py ouput_analysis/agentdojo_eval_litellm_gemini-2.5-flash-lite_
 ```bash
 # Summary table (all models)
 python analyze_results.py \
-    --add "GPT-4o" ouput_analysis/agentdojo_eval_litellm_gpt-4o-2024-05-13_all_judged.jsonl \
-    --add "Gemini-Flash-Lite" ouput_analysis/agentdojo_eval_litellm_gemini-2.5-flash-lite_all_judged.jsonl \
+    --add "GPT-4o" output_analysis/agentdojo_eval_litellm_gpt-4o-2024-05-13_all_judged.jsonl \
+    --add "Gemini-Flash-Lite" output_analysis/agentdojo_eval_litellm_gemini-2.5-flash-lite_all_judged.jsonl \
     --summary
 
 # Detailed view for one model
 python analyze_results.py \
-    --add "GPT-4o" ouput_analysis/agentdojo_eval_litellm_gpt-4o-2024-05-13_all_judged.jsonl \
+    --add "GPT-4o" output_analysis/agentdojo_eval_litellm_gpt-4o-2024-05-13_all_judged.jsonl \
     --detail "GPT-4o"
 
 # Trace metrics (attempted vs succeeded)
 python analyze_results.py \
-    --add "GPT-4o" ouput_analysis/agentdojo_eval_litellm_gpt-4o-2024-05-13_all_judged.jsonl \
-    --add "Gemini-Flash-Lite" ouput_analysis/agentdojo_eval_litellm_gemini-2.5-flash-lite_all_judged.jsonl \
+    --add "GPT-4o" output_analysis/agentdojo_eval_litellm_gpt-4o-2024-05-13_all_judged.jsonl \
+    --add "Gemini-Flash-Lite" output_analysis/agentdojo_eval_litellm_gemini-2.5-flash-lite_all_judged.jsonl \
     --trace
 
 # Generate all plots
 python analyze_results.py \
-    --add "GPT-4o" ouput_analysis/agentdojo_eval_litellm_gpt-4o-2024-05-13_all_judged.jsonl \
-    --add "Gemini-Flash-Lite" ouput_analysis/agentdojo_eval_litellm_gemini-2.5-flash-lite_all_judged.jsonl \
+    --add "GPT-4o" output_analysis/agentdojo_eval_litellm_gpt-4o-2024-05-13_all_judged.jsonl \
+    --add "Gemini-Flash-Lite" output_analysis/agentdojo_eval_litellm_gemini-2.5-flash-lite_all_judged.jsonl \
     --plot all
 ```
 
