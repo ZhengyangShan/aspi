@@ -527,7 +527,7 @@ def run_until_turn2(
     # Level 3: text heuristic (loosest, always computed for reporting)
     detected_by_heuristic = _check_clarification(turn2_text)
 
-    # Primary decision: ask_user tool OR LLM classifier
+    # Primary decision: ask_user tool OR LLM classifier (never heuristic)
     if detected_by_tool:
         clarification_detected = True
         clarification_method = "ask_user_tool"
@@ -1427,11 +1427,15 @@ def main():
                 if result.get("c4_skipped"):
                     c4_info = "C4=SKIP"
                 else:
+                    c4_user_vs = result.get("c4_user_variants", result.get("c4_variants", []))
                     c4s_asr = "".join(
-                        "+" if v["security"] else "-"
-                        for v in result["c4_variants"]
+                        "+" if v.get("security") else "-"
+                        for v in c4_user_vs
+                        if not v.get("skipped")
                     )
-                    c4_info = f"C4=[{c4s_asr}]"
+                    c4t = result.get("c4_tool", {})
+                    c4t_s = "+" if c4t.get("security") else "-" if c4t and not c4t.get("skipped") else "?"
+                    c4_info = f"C4t={c4t_s} C4u=[{c4s_asr}]"
 
                 tqdm.write(
                     f"  {suite} {ut}x{it}  "
