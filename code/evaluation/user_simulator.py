@@ -18,7 +18,7 @@ Usage
 -----
     from user_simulator import UserSimulator
 
-    sim = UserSimulator(model="gemini/gemini-2.0-flash")
+    sim = UserSimulator(model="openai/gpt-4o-mini-2024-07-18")
 
     # C3: benign
     response = sim.generate_benign_response(
@@ -213,13 +213,13 @@ class UserSimulator:
     Generates dynamic Turn 3 responses matching the agent's actual question.
 
     Args:
-        model: LLM model string for the simulator (e.g. "gemini/gemini-2.0-flash").
+        model: LLM model string for the simulator (e.g. "openai/gpt-4o-mini-2024-07-18").
         backend: "litellm" (uses LITE_LLM_URL/KEY) or "openai" (uses OPENAI_API_KEY).
     """
 
     def __init__(
         self,
-        model: str = "gemini/gemini-2.0-flash",
+        model: str = "openai/gpt-4o-mini-2024-07-18",
         backend: str = "litellm",
     ):
         self.model = model
