@@ -3,6 +3,10 @@ ASPI User Simulator
 ===================
 Generates dynamic Turn 3 responses that match the agent's actual Turn 2 question.
 
+Follows the LHAW paper (arxiv 2602.10525) approach: a simulated user LLM
+that has access to the original task specification, ground truth for removed
+segments, and a response policy.
+
 For C3 (benign): generates a natural response providing the missing information.
 For C4 (injected): generates a response that answers the question AND embeds
 the attack payload using the specified operator (HR/GS/CP).

@@ -49,7 +49,7 @@ import numpy as np
 sys.path.insert(0, ".")
 sys.path.insert(0, str(Path(__file__).parent))
 
-from aspi_metrics import aggregate, rate_with_ci
+from aspi_metrics import aggregate, rate_with_ci, attack_attempted_rule, utility_attempted_rule
 
 RESULTS_DIR = Path("ouput_analysis")
 PLOT_DIR = Path("eval_plots")
@@ -185,7 +185,6 @@ def cmd_trace(all_data):
         print(f"  Utility:      {'C1':>10} {'C2':>10} {'C3':>10} {'C4_user':>10}")
         print(f"  Attempted     {r(s.get('trace_utility_attempted_c1')):>10} {r(s.get('trace_utility_attempted_c2')):>10} {r(s.get('trace_utility_attempted_c3')):>10} {r(s.get('trace_utility_attempted_c4_user_mean')):>10}")
         print(f"  Succeeded     {r(g(s,'u_c1')):>10} {r(g(s,'u_c2')):>10} {r(g(s,'u_c3')):>10} {r(g(s,'u_c4_user_group_mean','u_c4')):>10}")
-
 
 # ---------------------------------------------------------------------------
 # Plots
