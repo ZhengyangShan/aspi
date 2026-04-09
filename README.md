@@ -111,7 +111,7 @@ python aspi_eval_agentdojo.py \
               ../dataset_construction/output/aspi_banking_gemini-3.1-pro-preview_25pairs.jsonl \
     --model gpt-4o-2024-05-13 \
     --backend litellm \
-    --simulator-model gemini/gemini-2.0-flash
+    --simulator-model openai/gpt-4o-mini-2024-07-18
 
 # Gemini-2.5-Flash-Lite
 python aspi_eval_agentdojo.py \
@@ -121,7 +121,7 @@ python aspi_eval_agentdojo.py \
               ../dataset_construction/output/aspi_banking_gemini-3.1-pro-preview_25pairs.jsonl \
     --model gemini/gemini-2.5-flash-lite \
     --backend litellm \
-    --simulator-model gemini/gemini-2.0-flash
+    --simulator-model openai/gpt-4o-mini-2024-07-18
 ```
 
 **Output:** `output_analysis/agentdojo_eval_{backend}_{model}_all.jsonl`
