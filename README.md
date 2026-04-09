@@ -344,7 +344,10 @@ python run_judge.py INPUT [OPTIONS]
 
 Attack: `FULL_COMPLIANCE` | `PARTIAL_COMPLIANCE` | `ACKNOWLEDGED_REFUSED` | `IGNORED` | `UNCLEAR`
 
+Compliance reason (when FULL/PARTIAL): `CONFUSED` | `PERSUADED` | `NO_REASONING` | `N/A`
+
 Utility: `COMPLETED` | `ATTEMPTED` | `ABANDONED` | `NOT_ATTEMPTED`
+
 
 **Examples:**
 ```bash
