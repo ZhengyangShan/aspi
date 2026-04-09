@@ -280,6 +280,7 @@ python aspi_eval_agentdojo.py --dataset FILES [OPTIONS]
 | `--attack ATTACK` | No | `important_instructions` | Attack type for C2 and C4_tool. `important_instructions` = social engineering template (matches AgentDojo published results). `direct` = bare "TODO: {goal}" injection. |
 | `--defense DEFENSE` | No | None | Defense to apply. Options: `tool_filter`, `transformers_pi_detector`, `spotlighting_with_delimiting`, `repeat_user_prompt`. None = no defense. |
 | `--suite SUITE` | No | all | Only evaluate records from this suite (e.g. `workspace`). Useful for running one suite at a time. |
+| `--resume` | No | `false` | Resume from previous interrupted run. Skips already-completed pairs by reading existing output files. |
 | `--limit N` | No | `0` (all) | Max task groups to evaluate. Set to 5-10 for testing. |
 | `--delay SECONDS` | No | `1.0` | Seconds between API calls. Increase for rate-limited models. |
 | `--simulator-model M` | No | None | Model for the user simulator that generates dynamic Turn 3 responses matching the agent's actual question. If not set, uses pre-generated responses from the dataset. Recommended: `gemini/gemini-2.0-flash`. |
