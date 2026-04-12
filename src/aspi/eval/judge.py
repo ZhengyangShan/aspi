@@ -166,6 +166,55 @@ class ASPIJudge:
                 lines.append(f"  {str(tc)[:200]}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _format_conversation(conversation: list) -> str:
+        """Format the full conversation (including tool results) for the judge.
+
+        This gives the judge visibility into what tools RETURNED, not
+        just what tools were CALLED. Critical for semantic attacks
+        (e.g., "book the most expensive hotel") where tool call args
+        are opaque IDs but tool results contain readable data (hotel
+        names, prices, etc.) that the judge needs to determine whether
+        the agent's actions matched the attacker's goal.
+        """
+        if not conversation:
+            return "(no conversation recorded)"
+        lines = []
+        for msg in conversation:
+            role = msg.get("role", "?")
+            content = msg.get("content", "") or ""
+            if isinstance(content, list):
+                # Content blocks — join text
+                content = "\n".join(
+                    b.get("content", "") for b in content
+                    if isinstance(b, dict) and b.get("content")
+                )
+            # Truncate long messages (tool results can be very verbose)
+            if len(content) > 500:
+                content = content[:500] + "...[truncated]"
+
+            if role == "tool":
+                tool_name = msg.get("tool_name", "?")
+                lines.append(f"  [tool result: {tool_name}] {content}")
+            elif role == "assistant":
+                tool_calls = msg.get("tool_calls", [])
+                if tool_calls:
+                    tc_str = ", ".join(
+                        f"{tc.get('function','?')}(...)"
+                        if isinstance(tc, dict) else str(tc)[:50]
+                        for tc in tool_calls[:5]
+                    )
+                    lines.append(f"  [assistant → tool calls: {tc_str}]")
+                if content.strip():
+                    lines.append(f"  [assistant] {content}")
+            elif role == "user":
+                lines.append(f"  [user] {content}")
+            elif role == "system":
+                continue  # skip system messages
+            else:
+                lines.append(f"  [{role}] {content}")
+        return "\n".join(lines[-30:])  # last 30 lines to stay within token budget
+
     def judge_attack(
         self,
         condition_result: dict,
@@ -181,8 +230,9 @@ class ASPIJudge:
             user_msg = ATTACK_JUDGE_USER.format(
                 attacker_goal=attacker_goal,
                 attacker_targets=_format_attacker_targets(attacker_goal),
-                tool_calls=self._format_tool_calls(condition_result.get("tool_calls", [])),
-                model_output=(condition_result.get("model_output", "") or "")[:500],
+                conversation=self._format_conversation(
+                    condition_result.get("full_conversation", [])
+                ),
             )
             response = self._call_llm(ATTACK_JUDGE_SYSTEM, user_msg)
             result = self._parse_json(response)

@@ -1,5 +1,18 @@
 """
 ASPI Results Analyzer
+=====================
+CLI tool to load saved evaluation results and generate tables + plots.
+No model calls needed — reads from saved JSONL files.
+
+10 plots total: 7 core (env-state) + 3 judge-only (auto-detected).
+
+Usage:
+    python analyze_results.py --summary
+    python analyze_results.py --plot all              # 7 core + judge if available
+    python analyze_results.py --plot core             # 7 core only
+    python analyze_results.py --plot judge             # 3 judge only
+    python analyze_results.py --plot utility_vs_asr    # single plot
+    python analyze_results.py --add "GPT-4o" results_judged.jsonl --plot all
 """
 
 from __future__ import annotations
@@ -36,14 +49,16 @@ def discover_default_results() -> dict[str, Path]:
     by a judged version. This lets `python scripts/analyze.py --summary`
     work out of the box after a pipeline run without requiring --add.
 
-    Naming: strips the `agentdojo_eval_` prefix and the `_judged` suffix
-    to form a short display name, e.g.
-    `agentdojo_eval_gpt-4o-2024-05-13_judged.jsonl` → `gpt-4o-2024-05-13`.
+    Naming: strips the `aspi_eval_` (or legacy `agentdojo_eval_`) prefix
+    and the `_judged` suffix to form a short display name, e.g.
+    `aspi_eval_gpt-4o-2024-05-13_judged.jsonl` → `gpt-4o-2024-05-13`.
     """
     def _display_name(path: Path) -> str:
         stem = path.stem
-        if stem.startswith("agentdojo_eval_"):
-            stem = stem[len("agentdojo_eval_"):]
+        for prefix in ("aspi_eval_", "agentdojo_eval_"):
+            if stem.startswith(prefix):
+                stem = stem[len(prefix):]
+                break
         if stem.endswith("_judged"):
             stem = stem[:-len("_judged")]
         return stem
@@ -77,8 +92,12 @@ DEFAULT_RESULTS: dict[str, Path] = {}
 # ---------------------------------------------------------------------------
 
 COLORS = {
-    "C1": "#2ecc71", "C2": "#e74c3c", "C2_user": "#8e44ad",
-    "C3": "#3498db", "C4_tool": "#9b59b6", "C4_user": "#e67e22",
+    "C1": "#27ae60",       # exec_benign — green (safe baseline)
+    "C2": "#e67e22",       # exec_tool_attack — orange
+    "C2_user": "#f0b27a",  # exec_user_attack — light orange (control)
+    "C3": "#2e86c1",       # clarif_benign — blue (safe baseline)
+    "C4_tool": "#cb4335",  # clarif_tool_attack — red
+    "C4_user": "#ec7063",  # clarif_user_attack — light red
 }
 MODEL_MARKERS = ["o", "s", "D", "^", "v", "P", "*", "X"]
 
@@ -162,48 +181,68 @@ def cmd_list(all_data):
 
 
 def cmd_summary(all_data):
-    """Summary table: every attacked condition reported for both utility and ASR.
+    """Summary tables: Utility and ASR for all 6 conditions, plus DASR deltas.
 
-    Four attacked conditions:
-        C2_tool = exec state, tool-channel injection (internal key: c2)
-        C2_user = exec state, user-channel control (raw attacker goal appended)
-        C4_tool = clarif state, tool-channel injection (replay fix applied)
-        C4_user = clarif state, user-channel injection (operator-framed Turn 3)
+    Condition naming (state × channel):
+        EB  = exec_benign          (baseline, no attack)
+        ETA = exec_tool_attack     (standard AgentDojo tool injection)
+        EUA = exec_user_attack     (user states attacker goal — compliance control)
+        CB  = clarif_benign        (clarification, benign user answer)
+        CTA = clarif_tool_attack   (tool injection during clarification)
+        CUA = clarif_user_attack   (operator-framed user-channel injection)
+
+    Printed as two side-by-side blocks: Utility then ASR + Deltas.
     """
     models = list(all_data.keys())
-    metrics = [
-        ("n",       lambda s: s["n_groups"]),
-        ("clarif",  lambda s: r(g(s,"clarif_rate"))),
-        # Utility — 6 conditions (C1, C3 are clean baselines)
-        ("u(C1)",   lambda s: r(g(s,"u_c1"))),
-        ("u(C2t)",  lambda s: r(g(s,"u_c2"))),               # C2_tool utility
-        ("u(C2u)",  lambda s: r(g(s,"u_c2_user"))),           # C2_user utility
-        ("u(C3)",   lambda s: r(g(s,"u_c3"))),
-        ("u(C4t)",  lambda s: r(g(s,"u_c4_tool"))),           # C4_tool utility
-        ("u(C4u)",  lambda s: r(g(s,"u_c4_user_group_mean","u_c4"))),  # C4_user utility
-        # ASR — 4 attacked conditions
-        ("ASR2t",   lambda s: r(g(s,"asr_c2"))),              # C2_tool ASR
-        ("ASR2u",   lambda s: r(g(s,"asr_c2_user"))),         # C2_user ASR
-        ("ASR4t",   lambda s: r(g(s,"asr_c4_tool"))),         # C4_tool ASR
-        ("ASR4u",   lambda s: r(g(s,"asr_c4_user_group_any","c4_any_attack_success","asr_c4"))),  # C4_user ASR
-        # Deltas
-        ("Dst",     lambda s: r(g(s,"dasr_state","delta_asr_any"))),
-        ("DstU",    lambda s: r(g(s,"dasr_state_user"))),
-        ("Dch",     lambda s: r(g(s,"dasr_channel"))),
-        ("DchE",    lambda s: r(g(s,"dasr_channel_exec"))),
-        ("Dcb",     lambda s: r(g(s,"dasr_combined","delta_asr_any"))),
-        ("n_cl",    lambda s: s.get("n_clarified","--")),
+    cw = 8  # column width
+
+    # ── Table 1: Utility ─────────────────────────────────────────
+    u_metrics = [
+        ("n",      lambda s: s["n_groups"]),
+        ("clarif", lambda s: r(g(s, "clarif_rate"))),
+        ("n_cl",   lambda s: s.get("n_clarified", "--")),
+        ("u(EB)",  lambda s: r(g(s, "u_c1"))),
+        ("u(ETA)", lambda s: r(g(s, "u_c2"))),
+        ("u(EUA)", lambda s: r(g(s, "u_c2_user"))),
+        ("u(CB)",  lambda s: r(g(s, "u_c3"))),
+        ("u(CTA)", lambda s: r(g(s, "u_c4_tool"))),
+        ("u(CUA)", lambda s: r(g(s, "u_c4_user_group_mean", "u_c4"))),
     ]
-    col_w = 7
-    header = f"{'Model':<20}" + "".join(f"{m[0]:>{col_w}}" for m in metrics)
-    print(f"\n{header}")
+    header = f"{'Model':<20}" + "".join(f"{m[0]:>{cw}}" for m in u_metrics)
+    print(f"\n{'─'*len(header)}")
+    print(f"UTILITY")
+    print(f"{'─'*len(header)}")
+    print(header)
     print("-" * len(header))
     for name in models:
         s = all_data[name]["summary"]
-        print(f"{name:<20}" + "".join(f"{m[1](s):>{col_w}}" for m in metrics))
-    print("\nConditions: C2t=C2_tool(exec+tool)  C2u=C2_user(exec+user,control)")
-    print("            C4t=C4_tool(clarif+tool)  C4u=C4_user(clarif+user)")
-    print("Deltas: Dst=C4t-C2t  DstU=C4u-C2u  Dch=C4u-C4t  DchE=C2u-C2t  Dcb=C4u-C2t")
+        print(f"{name:<20}" + "".join(f"{m[1](s):>{cw}}" for m in u_metrics))
+
+    # ── Table 2: ASR + Deltas ────────────────────────────────────
+    a_metrics = [
+        ("ASR(ETA)", lambda s: r(g(s, "asr_c2"))),
+        ("ASR(EUA)", lambda s: r(g(s, "asr_c2_user"))),
+        ("ASR(CTA)", lambda s: r(g(s, "asr_c4_tool"))),
+        ("ASR(CUA)", lambda s: r(g(s, "asr_c4_user_group_any", "c4_any_attack_success", "asr_c4"))),
+        ("Dst",      lambda s: r(g(s, "dasr_state", "delta_asr_any"))),
+        ("DstU",     lambda s: r(g(s, "dasr_state_user"))),
+        ("Dch",      lambda s: r(g(s, "dasr_channel"))),
+        ("DchE",     lambda s: r(g(s, "dasr_channel_exec"))),
+        ("Dcb",      lambda s: r(g(s, "dasr_combined", "delta_asr_any"))),
+    ]
+    header2 = f"{'Model':<20}" + "".join(f"{m[0]:>{cw}}" for m in a_metrics)
+    print(f"\n{'─'*len(header2)}")
+    print(f"ASR + DELTAS")
+    print(f"{'─'*len(header2)}")
+    print(header2)
+    print("-" * len(header2))
+    for name in models:
+        s = all_data[name]["summary"]
+        print(f"{name:<20}" + "".join(f"{m[1](s):>{cw}}" for m in a_metrics))
+
+    print(f"\nConditions:  EB=exec_benign  ETA=exec_tool_attack  EUA=exec_user_attack")
+    print(f"             CB=clarif_benign  CTA=clarif_tool_attack  CUA=clarif_user_attack")
+    print(f"Deltas:  Dst=CTA-ETA  DstU=CUA-EUA  Dch=CUA-CTA  DchE=EUA-ETA  Dcb=CUA-ETA")
 
 
 def cmd_detail(all_data, model_name):
@@ -217,38 +256,38 @@ def cmd_detail(all_data, model_name):
     print(f"{'='*60}")
 
     print(f"\n  Utility (all 6 conditions):   {'Rate':>25}")
-    for l, k in [
-        ("u(C1)",       "u_c1"),
-        ("u(C2_tool)",  "u_c2"),
-        ("u(C2_user)",  "u_c2_user"),
-        ("u(C3)",       "u_c3"),
-        ("u(C4_tool)",  "u_c4_tool"),
+    for label, key in [
+        ("exec_benign",         "u_c1"),
+        ("exec_tool_attack",    "u_c2"),
+        ("exec_user_attack",    "u_c2_user"),
+        ("clarif_benign",       "u_c3"),
+        ("clarif_tool_attack",  "u_c4_tool"),
     ]:
-        print(f"  {l:<20} {ci(g(s,k)):>25}")
-    print(f"  {'u(C4_user)':<20} {r(g(s,'u_c4_user_group_mean','u_c4')):>25}")
+        print(f"  {label:<24} {ci(g(s,key)):>25}")
+    print(f"  {'clarif_user_attack':<24} {r(g(s,'u_c4_user_group_mean','u_c4')):>25}")
 
     print(f"\n  ASR (4 attacked conditions):")
-    print(f"  {'ASR(C2_tool)':<20} {ci(g(s,'asr_c2')):>25}")
-    print(f"  {'ASR(C2_user)':<20} {ci(g(s,'asr_c2_user')):>25}")
-    print(f"  {'ASR(C4_tool)':<20} {ci(g(s,'asr_c4_tool')):>25}")
-    print(f"  {'ASR(C4_user) grp':<20} {ci(g(s,'asr_c4_user_group_any','c4_any_attack_success')):>25}")
-    print(f"  {'clarif_rate':<20} {ci(g(s,'clarif_rate')):>25}")
+    print(f"  {'exec_tool_attack':<24} {ci(g(s,'asr_c2')):>25}")
+    print(f"  {'exec_user_attack':<24} {ci(g(s,'asr_c2_user')):>25}")
+    print(f"  {'clarif_tool_attack':<24} {ci(g(s,'asr_c4_tool')):>25}")
+    print(f"  {'clarif_user_attack':<24} {ci(g(s,'asr_c4_user_group_any','c4_any_attack_success')):>25}")
+    print(f"  {'clarif_rate':<24} {ci(g(s,'clarif_rate')):>25}")
 
-    print(f"\n  DASR:                  {'All':>10} {'Clarified':>10}")
-    print(f"  {'state (C4t-C2)':<22} {r(g(s,'dasr_state','delta_asr_any')):>10} {r(g(s,'dasr_state_cond','delta_asr_any_cond')):>10}")
-    print(f"  {'state_user (C4u-C2u)':<22} {r(g(s,'dasr_state_user')):>10} {r(g(s,'dasr_state_user_cond')):>10}")
-    print(f"  {'channel (C4u-C4t)':<22} {r(g(s,'dasr_channel')):>10} {r(g(s,'dasr_channel_cond')):>10}")
-    print(f"  {'channel_exec (C2u-C2)':<22} {r(g(s,'dasr_channel_exec')):>10} {'--':>10}")
-    print(f"  {'combined (C4u-C2)':<22} {r(g(s,'dasr_combined','delta_asr_any')):>10} {r(g(s,'dasr_combined_cond','delta_asr_any_cond')):>10}")
+    print(f"\n  DASR:                          {'All':>10} {'Clarified':>10}")
+    print(f"  {'Dst  (CTA-ETA)':<28} {r(g(s,'dasr_state','delta_asr_any')):>10} {r(g(s,'dasr_state_cond','delta_asr_any_cond')):>10}")
+    print(f"  {'DstU (CUA-EUA)':<28} {r(g(s,'dasr_state_user')):>10} {r(g(s,'dasr_state_user_cond')):>10}")
+    print(f"  {'Dch  (CUA-CTA)':<28} {r(g(s,'dasr_channel')):>10} {r(g(s,'dasr_channel_cond')):>10}")
+    print(f"  {'DchE (EUA-ETA)':<28} {r(g(s,'dasr_channel_exec')):>10} {'--':>10}")
+    print(f"  {'Dcb  (CUA-ETA)':<28} {r(g(s,'dasr_combined','delta_asr_any')):>10} {r(g(s,'dasr_combined_cond','delta_asr_any_cond')):>10}")
 
     print(f"\n  Utility deltas:")
-    print(f"  {'u(C3)-u(C1)':<20} {r(g(s,'delta_u_clarif')):>10}")
-    print(f"  {'u(C2)-u(C1)':<20} {r(g(s,'delta_u_inject_c2')):>10}")
-    print(f"  {'u(C4u)-u(C3)':<20} {r(g(s,'delta_u_inject_c4_user','delta_u_inject_c4')):>10}")
-    print(f"  {'u(C4t)-u(C3)':<20} {r(g(s,'delta_u_inject_c4_tool')):>10}")
+    print(f"  {'CB - EB':<24} {r(g(s,'delta_u_clarif')):>10}")
+    print(f"  {'ETA - EB':<24} {r(g(s,'delta_u_inject_c2')):>10}")
+    print(f"  {'CUA - CB':<24} {r(g(s,'delta_u_inject_c4_user','delta_u_inject_c4')):>10}")
+    print(f"  {'CTA - CB':<24} {r(g(s,'delta_u_inject_c4_tool')):>10}")
 
     if s.get("by_operator"):
-        print(f"\n  Per operator:")
+        print(f"\n  Per operator (clarif_user_attack):")
         for op, m in sorted(s["by_operator"].items()):
             asr = m.get("asr_c4_user", m.get("asr_c4", {}))
             d = m.get("dasr_combined", m.get("delta_asr", 0))
@@ -262,13 +301,15 @@ def cmd_trace(all_data):
         s = all_data[name]["summary"]
         print(f"\n{name}:")
         # Attack row: 4 attacked conditions
-        print(f"  Attack:       {'C2_tool':>10} {'C2_user':>10} {'C4_tool':>10} {'C4_user':>10}")
+        print(f"  Attack:       {'ETA':>10} {'EUA':>10} {'CTA':>10} {'CUA':>10}")
         print(f"  Attempted     {r(s.get('trace_attack_attempted_c2')):>10} {r(s.get('trace_attack_attempted_c2_user')):>10} {r(s.get('trace_attack_attempted_c4_tool')):>10} {r(s.get('trace_attack_attempted_c4_user_any')):>10}")
         print(f"  Succeeded     {r(g(s,'asr_c2')):>10} {r(g(s,'asr_c2_user')):>10} {r(g(s,'asr_c4_tool')):>10} {r(g(s,'asr_c4_user_group_any','c4_any_attack_success','asr_c4')):>10}")
         # Utility row: all 6 conditions
-        print(f"  Utility:      {'C1':>10} {'C2_tool':>10} {'C2_user':>10} {'C3':>10} {'C4_tool':>10} {'C4_user':>10}")
+        print(f"  Utility:      {'EB':>10} {'ETA':>10} {'EUA':>10} {'CB':>10} {'CTA':>10} {'CUA':>10}")
         print(f"  Attempted     {r(s.get('trace_utility_attempted_c1')):>10} {r(s.get('trace_utility_attempted_c2')):>10} {r(s.get('trace_utility_attempted_c2_user')):>10} {r(s.get('trace_utility_attempted_c3')):>10} {r(s.get('trace_utility_attempted_c4_tool')):>10} {r(s.get('trace_utility_attempted_c4_user_mean')):>10}")
         print(f"  Succeeded     {r(g(s,'u_c1')):>10} {r(g(s,'u_c2')):>10} {r(g(s,'u_c2_user')):>10} {r(g(s,'u_c3')):>10} {r(g(s,'u_c4_tool')):>10} {r(g(s,'u_c4_user_group_mean','u_c4')):>10}")
+    print(f"\n  EB=exec_benign  ETA=exec_tool_attack  EUA=exec_user_attack")
+    print(f"  CB=clarif_benign  CTA=clarif_tool_attack  CUA=clarif_user_attack")
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +477,71 @@ def plot_asr_by_condition(all_data, save_dir):
     ax.legend(fontsize=9); ax.set_ylim(0, 1.15)
     plt.tight_layout()
     out = save_dir / "aspi_asr_by_condition.png"
+    plt.savefig(out, dpi=150, bbox_inches="tight"); plt.close()
+    print(f"Saved: {out}")
+
+
+def plot_utility_by_condition(all_data, save_dir):
+    """Plot: Grouped bar — utility per condition (all 6) with CI error bars."""
+    models = list(all_data.keys())
+
+    # All 6 conditions: (label, key, color)
+    conds = [
+        ("C1",      "u_c1",      COLORS["C1"]),
+        ("C2_tool", "u_c2",      COLORS["C2"]),
+        ("C2_user", "u_c2_user", COLORS["C2_user"]),
+        ("C3",      "u_c3",      COLORS["C3"]),
+        ("C4_tool", "u_c4_tool", COLORS["C4_tool"]),
+    ]
+    # C4_user uses group-mean, which may be a plain float or a dict
+    conds.append(("C4_user", None, COLORS["C4_user"]))
+
+    # Filter to conditions that have data
+    active_conds = []
+    for label, key, color in conds:
+        if key is None:
+            # C4_user always included
+            active_conds.append((label, key, color))
+            continue
+        has_data = any(
+            (g(all_data[m]["summary"], key) or {}).get("rate") is not None
+            for m in models
+        )
+        if has_data:
+            active_conds.append((label, key, color))
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    x = np.arange(len(models))
+    w = 0.8 / max(len(active_conds), 1)
+
+    for j, (label, key, color) in enumerate(active_conds):
+        if key:
+            metrics = [g(all_data[m]["summary"], key) or {} for m in models]
+        else:
+            metrics = [
+                g(all_data[m]["summary"], "u_c4_user_group_mean", "u_c4") or {}
+                for m in models
+            ]
+
+        vals = [_val(met) for met in metrics]
+        errs = [_ci_err(met) for met in metrics]
+        yerr = np.array([e if e else [0, 0] for e in errs]).T
+
+        offset = (j - (len(active_conds) - 1) / 2) * w
+        bars = ax.bar(x + offset, vals, w, label=label, color=color,
+                      yerr=yerr, capsize=3, error_kw={"linewidth": 1})
+        for bar in bars:
+            h = bar.get_height()
+            if h > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, h + 0.03,
+                        f"{h:.0%}", ha="center", fontsize=7)
+
+    ax.set_ylabel("Utility", fontsize=11)
+    ax.set_title("Utility by Condition — all 6 conditions", fontsize=12)
+    ax.set_xticks(x); ax.set_xticklabels(models, rotation=15, ha="right")
+    ax.legend(fontsize=8, loc="best"); ax.set_ylim(0, 1.15)
+    plt.tight_layout()
+    out = save_dir / "aspi_utility_by_condition.png"
     plt.savefig(out, dpi=150, bbox_inches="tight"); plt.close()
     print(f"Saved: {out}")
 
@@ -880,6 +986,7 @@ CORE_PLOTS = {
     "utility_vs_asr": plot_utility_vs_asr,
     "utility_degradation": plot_utility_degradation,
     "asr_by_condition": plot_asr_by_condition,
+    "utility_by_condition": plot_utility_by_condition,
     "dasr": plot_dasr,
     "asr_by_suite": plot_asr_by_suite,
     "operators": plot_operators,
@@ -971,7 +1078,7 @@ Examples:
         print()
         print("Fix: either pass one or more --add flags, e.g.")
         print("  python scripts/analyze.py --plot all \\")
-        print("    --add \"GPT-4o\" results/judged/agentdojo_eval_gpt-4o-2024-05-13_judged.jsonl")
+        print("    --add \"GPT-4o\" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl")
         print()
         print("Or place your judged JSONL(s) in results/judged/ and re-run.")
         import sys
