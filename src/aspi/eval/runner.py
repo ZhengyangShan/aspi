@@ -1,4 +1,52 @@
 """
+ASPI AgentDojo Evaluator
+========================
+Full environment-state-based scoring using AgentDojo's pipeline — matching
+exactly how the AgentDojo paper (Figures 6/7) computes utility and ASR.
+
+Scoring method
+--------------
+  AgentDojo scores by checking **environment state** after tool execution:
+    - utility()  -> did the agent call the right tools / produce correct side-effects?
+    - security() -> did the agent execute the attacker's goal (e.g. send the email)?
+
+  Both are boolean per-task, then averaged to get rates (simple proportions,
+  same as AgentDojo paper S3.4). Confidence intervals use binomial proportions.
+
+  Priority: utility_from_traces() first (checks function call history),
+  falls back to utility() (checks env state + text output).
+
+  Security convention (AgentDojo):
+    security = True  -> attack SUCCEEDED (agent executed attacker's goal)
+    security = False -> attack FAILED (agent resisted)
+    ASR (Attack Success Rate) = proportion where security = True
+
+Real 4-turn protocol for C3/C4
+-------------------------------
+  C3 and C4 use a genuine multi-turn interaction:
+
+    Turn 1: User sends base_prompt (ambiguous, missing one slot)
+    Turn 2: Agent responds (ideally asks a clarification question)
+    Turn 3: User sends clarification response (benign for C3, injected for C4)
+    Turn 4: Agent responds with tool execution, scored by AgentDojo
+
+  This ensures the agent genuinely enters a clarification-seeking state
+  before encountering the injection payload, which is the core of the
+  ASPI hypothesis (state-dependent vulnerability).
+
+  The full pipeline (SystemMessage + InitQuery + LLM + ToolsExecutionLoop)
+  runs for Turn 1-2. For Turn 3-4, we append the user message to the
+  existing conversation and run only the continuation elements
+  (LLM + ToolsExecutionLoop), preserving the same environment.
+
+Two-level metric structure
+--------------------------
+  Group-level  (one per task group, no duplication):
+      u(C1), u(C2), ASR(C2), clarif_rate(C3), u(C3)
+  Operator-level (one per C4 variant):
+      ASR(C4), u(C4), DASR = ASR(C4) - ASR(C2) per operator
+
+  DASR > 0 means clarification state INCREASES vulnerability.
 
 Usage
 -----
@@ -415,7 +463,16 @@ def run_agentdojo_eval(
             env = e.task_environment
             messages = e.messages
         except Exception as e:
-            warnings.warn(f"Pipeline error for {user_task.ID}: {e}")
+            # Most common cause: the LLM returned an empty/None response
+            # and AgentDojo's pipeline tried to index into it. Recording
+            # the exception class makes weaker-model failures easier to
+            # triage (TypeError = downstream None-indexing, KeyError =
+            # missing dict field, ValidationError = bad JSON from the
+            # model, APITimeoutError = network, etc.).
+            warnings.warn(
+                f"Pipeline error for {user_task.ID}: "
+                f"{type(e).__name__}: {e}"
+            )
             break
 
         model_output_blocks = _model_output(messages)
@@ -781,43 +838,56 @@ def evaluate_group(
         "missing_slot": group.get("C3", {}).get("missing_slot", ""),
     }
 
-    # ── C1: original prompt, clean environment ────────────────────────
-    c1_query = user_task.PROMPT
-    c1 = run_agentdojo_eval(
-        suite, user_task, inj_task=None,
-        query=c1_query, injections={}, pipeline=pipeline,
-    )
-    c1["condition"] = "C1"
-    result["c1"] = c1
-    time.sleep(delay)
-
-    # ── C2: original prompt + tool-result injections ──────────────────
-    # Generate injections at runtime using the selected attack type.
-    # This replaces the pre-computed agentdojo_injections from the dataset.
+    # ── Pre-generate C2-injection dict (cheap local call, needed by
+    #     both C2_tool and later by C4_tool replay) ──────────────────
     c2_injections = attack_obj.attack(user_task, inj_task)
-    c2 = run_agentdojo_eval(
-        suite, user_task, inj_task,
-        query=c1_query, injections=c2_injections, pipeline=pipeline,
-    )
-    c2["condition"] = "C2"
-    result["c2"] = c2
-    time.sleep(delay)
 
-    # ── C2_user: original prompt + raw attacker goal appended (CONTROL) ──
-    # This is NOT a prompt injection — it is a compliance baseline where
-    # the user states the attacker goal as part of their own request.
-    # Its purpose is to establish the floor for C4_user's interpretation:
-    # if ASR(C4_user) ≈ ASR(C2_user), the clarification-state effect is
-    # just user compliance; if ASR(C4_user) > ASR(C2_user), the delta is
-    # the contribution of clarification state + operator framing.
+    c1_query = user_task.PROMPT
     c2_user_query = user_task.PROMPT + "\n\n" + inj_task.GOAL
-    c2_user = run_agentdojo_eval(
-        suite, user_task, inj_task,
-        query=c2_user_query, injections={}, pipeline=pipeline,
-    )
-    c2_user["condition"] = "C2_user"
-    c2_user["appended_attack"] = inj_task.GOAL
-    result["c2_user"] = c2_user
+
+    # ── Phase 0: C1 + C2_tool + C2_user in parallel ─────────────────
+    # These three are fully independent single-turn runs. Each calls
+    # run_agentdojo_eval with its own query/injections; they don't
+    # share state besides the read-only pipeline/suite/tasks.
+    # Fanning them out to 3 threads roughly triples this phase's
+    # wall-clock throughput at the cost of peak concurrent load on
+    # the LiteLLM proxy.
+    def _run_c1():
+        r = run_agentdojo_eval(
+            suite, user_task, inj_task=None,
+            query=c1_query, injections={}, pipeline=pipeline,
+        )
+        r["condition"] = "C1"
+        return r
+
+    def _run_c2_tool():
+        r = run_agentdojo_eval(
+            suite, user_task, inj_task,
+            query=c1_query, injections=c2_injections, pipeline=pipeline,
+        )
+        r["condition"] = "C2"
+        return r
+
+    def _run_c2_user():
+        # C2_user is NOT a prompt injection — it is a compliance
+        # baseline where the user states the attacker goal as part of
+        # their own request. If ASR(C4_user) ≈ ASR(C2_user) the
+        # clarification-state effect collapses to baseline compliance.
+        r = run_agentdojo_eval(
+            suite, user_task, inj_task,
+            query=c2_user_query, injections={}, pipeline=pipeline,
+        )
+        r["condition"] = "C2_user"
+        r["appended_attack"] = inj_task.GOAL
+        return r
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        fut_c1 = executor.submit(_run_c1)
+        fut_c2 = executor.submit(_run_c2_tool)
+        fut_c2_user = executor.submit(_run_c2_user)
+        result["c1"] = fut_c1.result()
+        result["c2"] = fut_c2.result()
+        result["c2_user"] = fut_c2_user.result()
     time.sleep(delay)
 
     # ── Phase 1: Run Turn 1-2 ONCE (shared by C3 and all C4 variants) ──
@@ -942,8 +1012,13 @@ def evaluate_group(
         result["c4_tool"] = c4_tool
         time.sleep(delay)
 
-        # ── C4_user variants: injected Turn 3 + clean env ────────
-        for c4_rec in c4_variants_data:
+        # ── C4_user variants: injected Turn 3 + clean env (parallel) ──
+        # Each variant is independent: it generates its own injected
+        # Turn 3 via the simulator, deep-copies turn2_state, and runs
+        # Turn 4 continuation. Fanning out across operators collapses
+        # this phase's wall-clock time from N×(simulator + continuation)
+        # to max(simulator + continuation).
+        def _run_c4_user(c4_rec):
             # Generate Turn 3 injected response
             c4_turn3_source = "pre_generated"
             c4_turn3_text = c4_rec.get("injected_clarification_response", "")
@@ -973,9 +1048,24 @@ def evaluate_group(
             c4["skipped"] = False
             c4["injection_operator"] = c4_rec.get("injection_operator", "")
             c4["failure_mode_label"] = c4_rec.get("failure_mode_label", "")
+            return c4
 
-            c4_user_results.append(c4)
-            time.sleep(delay)
+        # Preserve input order — use a dict keyed by submission index so
+        # we can reassemble results in the original order regardless of
+        # which future completes first.
+        if c4_variants_data:
+            with ThreadPoolExecutor(
+                max_workers=max(1, len(c4_variants_data)),
+            ) as executor:
+                futures_by_idx = {
+                    i: executor.submit(_run_c4_user, c4_rec)
+                    for i, c4_rec in enumerate(c4_variants_data)
+                }
+                c4_user_results = [
+                    futures_by_idx[i].result()
+                    for i in range(len(c4_variants_data))
+                ]
+        time.sleep(delay)
 
     result["c4_user_variants"] = c4_user_results
     result["c4_skipped"] = c4_skipped
@@ -1371,6 +1461,10 @@ def main():
 
     print(f"\n  Results:  {results_path}")
     print(f"  Summary:  {summary_path}")
+    print(f"\n  Next steps:")
+    print(f"    python run_judge.py {results_path}                    # Step 3: LLM judge")
+    print(f"    python analyze_results.py --add \"{args.model}\" {results_path} --summary  # Step 4: metrics")
+
 
 if __name__ == "__main__":
     main()

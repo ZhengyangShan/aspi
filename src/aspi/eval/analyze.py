@@ -40,7 +40,48 @@ from aspi.eval.metrics import (
 RESULTS_DIR = EVAL_RESULTS_DIR
 PLOT_DIR = PLOTS_DIR
 
-# Default result files — add new models here or use --add
+
+def discover_default_results() -> dict[str, Path]:
+    """Build a default `{name: path}` dict from files on disk.
+
+    Scans `results/judged/` first (preferred — has richer metrics), then
+    `results/eval/` for any `*.jsonl` files that aren't already covered
+    by a judged version. This lets `python scripts/analyze.py --summary`
+    work out of the box after a pipeline run without requiring --add.
+
+    Naming: strips the `agentdojo_eval_` prefix and the `_judged` suffix
+    to form a short display name, e.g.
+    `agentdojo_eval_gpt-4o-2024-05-13_judged.jsonl` → `gpt-4o-2024-05-13`.
+    """
+    def _display_name(path: Path) -> str:
+        stem = path.stem
+        if stem.startswith("agentdojo_eval_"):
+            stem = stem[len("agentdojo_eval_"):]
+        if stem.endswith("_judged"):
+            stem = stem[:-len("_judged")]
+        return stem
+
+    discovered: dict[str, Path] = {}
+
+    # Judged files take priority (they have richer judge-level metrics).
+    if JUDGED_RESULTS_DIR.exists():
+        for p in sorted(JUDGED_RESULTS_DIR.glob("*.jsonl")):
+            name = _display_name(p)
+            discovered[name] = p
+
+    # Fall back to raw eval files for any model that doesn't have a
+    # judged version yet.
+    if EVAL_RESULTS_DIR.exists():
+        for p in sorted(EVAL_RESULTS_DIR.glob("*.jsonl")):
+            name = _display_name(p)
+            if name not in discovered:
+                discovered[name] = p
+
+    return discovered
+
+
+# Default result files. Empty dict means "auto-discover at runtime from
+# results/judged/ and results/eval/". Override with --add NAME PATH.
 DEFAULT_RESULTS: dict[str, Path] = {}
 
 
@@ -903,11 +944,21 @@ Examples:
                         help=f"Directory for results (default: {RESULTS_DIR})")
     args = parser.parse_args()
 
-    # Build result files dict
+    # Build result files dict. Priority order:
+    #   1. --add flags (explicit user override)
+    #   2. DEFAULT_RESULTS constant (hardcoded defaults, empty by default)
+    #   3. Auto-discovered files from results/judged/ and results/eval/
     result_files = dict(DEFAULT_RESULTS)
     if args.add:
         for name, path in args.add:
             result_files[name] = Path(path)
+    if not result_files:
+        result_files = discover_default_results()
+        if result_files:
+            print(f"Auto-discovered {len(result_files)} result file(s):")
+            for name, path in result_files.items():
+                print(f"  {name}  →  {path}")
+            print()
 
     # Update paths if custom dirs
     if args.results_dir != str(RESULTS_DIR):
@@ -916,14 +967,28 @@ Examples:
                        for k, v in result_files.items()}
 
     save_dir = Path(args.plot_dir)
-    save_dir.mkdir(exist_ok=True)
+    save_dir.mkdir(parents=True, exist_ok=True)
 
     # Load
     print("Loading results...")
     all_data = load_results(result_files)
     if not all_data:
-        print("No results loaded. Check file paths.")
-        return
+        print()
+        print("ERROR: No results loaded — no plots or tables will be generated.")
+        print()
+        print("The analyzer looks for result files in this order:")
+        print("  1. Files passed via `--add NAME PATH` (explicit override)")
+        print("  2. Auto-discovery of .jsonl files under:")
+        print(f"       {JUDGED_RESULTS_DIR}   (preferred)")
+        print(f"       {EVAL_RESULTS_DIR}")
+        print()
+        print("Fix: either pass one or more --add flags, e.g.")
+        print("  python scripts/analyze.py --plot all \\")
+        print("    --add \"GPT-4o\" results/judged/agentdojo_eval_gpt-4o-2024-05-13_judged.jsonl")
+        print()
+        print("Or place your judged JSONL(s) in results/judged/ and re-run.")
+        import sys
+        sys.exit(1)
 
     # Execute commands
     if args.list:
