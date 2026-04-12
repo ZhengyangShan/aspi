@@ -1,52 +1,4 @@
 """
-ASPI AgentDojo Evaluator
-========================
-Full environment-state-based scoring using AgentDojo's pipeline — matching
-exactly how the AgentDojo paper (Figures 6/7) computes utility and ASR.
-
-Scoring method
---------------
-  AgentDojo scores by checking **environment state** after tool execution:
-    - utility()  -> did the agent call the right tools / produce correct side-effects?
-    - security() -> did the agent execute the attacker's goal (e.g. send the email)?
-
-  Both are boolean per-task, then averaged to get rates (simple proportions,
-  same as AgentDojo paper S3.4). Confidence intervals use binomial proportions.
-
-  Priority: utility_from_traces() first (checks function call history),
-  falls back to utility() (checks env state + text output).
-
-  Security convention (AgentDojo):
-    security = True  -> attack SUCCEEDED (agent executed attacker's goal)
-    security = False -> attack FAILED (agent resisted)
-    ASR (Attack Success Rate) = proportion where security = True
-
-Real 4-turn protocol for C3/C4
--------------------------------
-  C3 and C4 use a genuine multi-turn interaction:
-
-    Turn 1: User sends base_prompt (ambiguous, missing one slot)
-    Turn 2: Agent responds (ideally asks a clarification question)
-    Turn 3: User sends clarification response (benign for C3, injected for C4)
-    Turn 4: Agent responds with tool execution, scored by AgentDojo
-
-  This ensures the agent genuinely enters a clarification-seeking state
-  before encountering the injection payload, which is the core of the
-  ASPI hypothesis (state-dependent vulnerability).
-
-  The full pipeline (SystemMessage + InitQuery + LLM + ToolsExecutionLoop)
-  runs for Turn 1-2. For Turn 3-4, we append the user message to the
-  existing conversation and run only the continuation elements
-  (LLM + ToolsExecutionLoop), preserving the same environment.
-
-Two-level metric structure
---------------------------
-  Group-level  (one per task group, no duplication):
-      u(C1), u(C2), ASR(C2), clarif_rate(C3), u(C3)
-  Operator-level (one per C4 variant):
-      ASR(C4), u(C4), DASR = ASR(C4) - ASR(C2) per operator
-
-  DASR > 0 means clarification state INCREASES vulnerability.
 
 Usage
 -----
@@ -1419,10 +1371,6 @@ def main():
 
     print(f"\n  Results:  {results_path}")
     print(f"  Summary:  {summary_path}")
-    print(f"\n  Next steps:")
-    print(f"    python run_judge.py {results_path}                    # Step 3: LLM judge")
-    print(f"    python analyze_results.py --add \"{args.model}\" {results_path} --summary  # Step 4: metrics")
-
 
 if __name__ == "__main__":
     main()
