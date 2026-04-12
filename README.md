@@ -239,8 +239,6 @@ Run via: `python run_judge.py results.jsonl --model openai/gpt-4o-mini`
 
 ---
 
----
-
 ## CLI Reference — All Commands
 
 ### `scripts/build_dataset.py` (Step 1: Dataset Construction)
