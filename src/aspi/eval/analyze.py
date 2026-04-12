@@ -1,18 +1,5 @@
 """
 ASPI Results Analyzer
-=====================
-CLI tool to load saved evaluation results and generate tables + plots.
-No model calls needed — reads from saved JSONL files.
-
-10 plots total: 7 core (env-state) + 3 judge-only (auto-detected).
-
-Usage:
-    python analyze_results.py --summary
-    python analyze_results.py --plot all              # 7 core + judge if available
-    python analyze_results.py --plot core             # 7 core only
-    python analyze_results.py --plot judge             # 3 judge only
-    python analyze_results.py --plot utility_vs_asr    # single plot
-    python analyze_results.py --add "GPT-4o" results_judged.jsonl --plot all
 """
 
 from __future__ import annotations
