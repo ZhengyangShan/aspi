@@ -56,7 +56,6 @@ All deltas are paired per-group (same `(user_task, injection_task)` evaluated in
 ai-safety/
 ├── pyproject.toml              # `pip install -e .` makes `import aspi` work
 ├── .env.example                # copy to .env and fill in LITE_LLM_KEY/URL
-├── agentdojo/                  # vendored AgentDojo v1.2.2
 │
 ├── src/aspi/                   # the importable package
 │   ├── common/                 #   shared helpers (constants, paths, IO, LiteLLM)
@@ -81,23 +80,11 @@ ai-safety/
 │   └── check_quality.py        #   → aspi.dataset.quality.main
 │
 ├── data/                       # dataset JSONLs (gitignored)
-├── results/
-│   ├── eval/                   #   raw eval results
-│   ├── judged/                 #   judge-annotated results
-│   ├── plots/                  #   analysis PNGs
-│   └── errors/                 #   structured error logs (rare)
-│
-├── notebooks/                  # interactive exploration
-│   ├── aspi_demo.ipynb
-│   ├── aspi_eval_analysis.ipynb       # single-model inspector
-│   └── aspi_results_analysis.ipynb    # multi-model paper figures
-│
-└── code/                       # legacy notebook holders (kept untouched)
-    ├── dataset_construction/litellm_client.py  # back-compat shim
-    ├── quality_checking/aspi_pairing_analysis.ipynb
-    └── validation/                            # standalone clarification validator
-        ├── validate_clarification.py
-        └── clarification_validation_analysis.ipynb
+└── results/
+    ├── eval/                   #   raw eval results
+    ├── judged/                 #   judge-annotated results
+    ├── plots/                  #   analysis PNGs
+    └── errors/                 #   structured error logs (rare)
 ```
 
 ---
