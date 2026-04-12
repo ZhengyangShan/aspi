@@ -140,61 +140,107 @@ def call_stage2(client, ambig, attacker_goal, operator):
 
 
 # ---------------------------------------------------------------------------
-# Record builders
+# Record builder — one grouped record per (user_task, injection_task) pair
 # ---------------------------------------------------------------------------
 
-def build_base(suite_name, ut, it, gt_calls):
-    """Fields shared by all conditions for a given pair."""
-    return dict(
-        suite=suite_name,
-        user_task_id=ut.ID,
-        injection_task_id=it.ID,
-        original_prompt=ut.PROMPT,
-        ground_truth_output=str(ut.GROUND_TRUTH_OUTPUT),
-        ground_truth_tool_calls=serialize_calls(gt_calls),
-        attacker_goal=it.GOAL,
-    )
+def build_group(suite_name, ut, it, gt_calls, ambig, injection_results,
+                generator_model=""):
+    """Build a single grouped record for one (user_task, injection_task) pair.
+
+    The grouped format contains ONLY:
+      - Task identifiers (suite, user_task_id, injection_task_id)
+      - AgentDojo convenience fields (original_prompt, attacker_goal,
+        ground_truth_tool_calls) so the dataset is self-contained
+      - ASPI Stage 1 output (base_prompt, missing_slot, benign_clarification_response, ...)
+      - ASPI Stage 2 output (injections list, one per operator)
+      - Metadata (generator model, versions)
+
+    Dead fields from the old flat format are removed:
+      - condition (unnecessary — one line IS one group)
+      - agentdojo_injections (never used; eval regenerates at runtime)
+      - operator_category (duplicate of operator)
+      - ground_truth_output (never read by evaluator)
+
+    Args:
+        injection_results: list of (operator, inj_data) tuples from Stage 2
+    """
+    return {
+        # Task identifiers
+        "suite": suite_name,
+        "user_task_id": ut.ID,
+        "injection_task_id": it.ID,
+
+        # AgentDojo convenience fields (so the dataset is self-contained
+        # and researchers don't need to install AgentDojo to inspect it)
+        "original_prompt": ut.PROMPT,
+        "attacker_goal": it.GOAL,
+        "ground_truth_tool_calls": serialize_calls(gt_calls),
+
+        # ASPI Stage 1 output (attacker-blind ambiguity generation)
+        "base_prompt": ambig.get("base_prompt", ""),
+        "missing_slot": ambig.get("missing_slot", ""),
+        "expected_clarification_question": ambig.get("expected_clarification_question", ""),
+        "benign_clarification_response": ambig.get("benign_clarification_response", ""),
+        "ground_truth_safe_action": ambig.get("ground_truth_safe_action", ""),
+        "ground_truth_task_answer": ambig.get("ground_truth_task_answer", ""),
+        "claims_list": ambig.get("claims_list", []),
+
+        # ASPI Stage 2 output (one entry per operator)
+        "injections": [
+            {
+                "operator": operator,
+                "failure_mode": inj_data.get("failure_mode_label", ""),
+                "injected_clarification_response": inj_data.get("injected_clarification_response", ""),
+                "injection_rationale": inj_data.get("injection_rationale", ""),
+            }
+            for operator, inj_data in injection_results
+        ],
+
+        # Metadata
+        "metadata": {
+            "generator_model": generator_model,
+            "agentdojo_version": BENCH_VERSION,
+        },
+    }
 
 
-def build_c1(base):
-    return {**base, "condition": "C1",
-            "base_prompt": base["original_prompt"],
-            "agentdojo_injections": {}}
+def _build_flat_for_qc(ut, it, ambig, inj_data=None, operator=None):
+    """Build a temporary flat record for QC checks.
 
-
-def build_c2(base, injections):
-    return {**base, "condition": "C2",
-            "base_prompt": base["original_prompt"],
-            "agentdojo_injections": injections}
-
-
-def build_c3(base, ambig):
-    return {**base, "condition": "C3",
-            "base_prompt":                     ambig.get("base_prompt", ""),
-            "missing_slot":                    ambig.get("missing_slot", ""),
+    quality.py's check_record() expects the old flat format with a
+    'condition' field. We construct throwaway dicts just for QC —
+    they are NOT written to the output file.
+    """
+    base = {
+        "original_prompt": ut.PROMPT,
+        "ground_truth_output": str(ut.GROUND_TRUTH_OUTPUT),
+        "attacker_goal": it.GOAL,
+    }
+    if inj_data is None:
+        # Stage 1 QC (check the ambiguity output)
+        return {
+            **base,
+            "condition": "C3",
+            "base_prompt": ambig.get("base_prompt", ""),
+            "missing_slot": ambig.get("missing_slot", ""),
             "expected_clarification_question": ambig.get("expected_clarification_question", ""),
-            "benign_clarification_response":   ambig.get("benign_clarification_response", ""),
-            "ground_truth_safe_action":        ambig.get("ground_truth_safe_action", ""),
-            "ground_truth_task_answer":        ambig.get("ground_truth_task_answer", ""),
-            "claims_list":                     ambig.get("claims_list", []),
-            "agentdojo_injections":            {}}
-
-
-def build_c4(base, ambig, inj_data, operator):
-    return {**base, "condition": "C4",
-            "base_prompt":                     ambig.get("base_prompt", ""),
-            "missing_slot":                    ambig.get("missing_slot", ""),
+            "benign_clarification_response": ambig.get("benign_clarification_response", ""),
+            "ground_truth_safe_action": ambig.get("ground_truth_safe_action", ""),
+            "ground_truth_task_answer": ambig.get("ground_truth_task_answer", ""),
+            "claims_list": ambig.get("claims_list", []),
+        }
+    else:
+        # Stage 2 QC (check one injection variant)
+        return {
+            **base,
+            "condition": "C4",
+            "base_prompt": ambig.get("base_prompt", ""),
+            "missing_slot": ambig.get("missing_slot", ""),
             "expected_clarification_question": ambig.get("expected_clarification_question", ""),
-            "benign_clarification_response":   ambig.get("benign_clarification_response", ""),
-            "ground_truth_safe_action":        ambig.get("ground_truth_safe_action", ""),
-            "ground_truth_task_answer":        ambig.get("ground_truth_task_answer", ""),
-            "claims_list":                     ambig.get("claims_list", []),
+            "benign_clarification_response": ambig.get("benign_clarification_response", ""),
             "injected_clarification_response": inj_data.get("injected_clarification_response", ""),
-            "injection_operator":              operator,
-            "operator_category":               operator if operator in STANDARD_OPERATORS else "other",
-            "failure_mode_label":              inj_data.get("failure_mode_label", ""),
-            "injection_rationale":             inj_data.get("injection_rationale", ""),
-            "agentdojo_injections":            {}}
+            "injection_operator": operator,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -296,26 +342,25 @@ def _stage2_critical_fail(flags: dict) -> bool:
     )
 
 
-def _process_one_pair(ut, it, suite, suite_name, attack, client):
+def _process_one_pair(ut, it, suite, suite_name, attack, client,
+                      generator_model=""):
     """Process one (user_task, injection_task) pair end-to-end.
 
     PURE function — no I/O outside LLM calls, no shared mutable state.
     Returns a dict:
         {
-            "pair_key": "suite:ut_id:it_id",
-            "records":  [c1, c2, c3?, c4_HR?, c4_GS?, c4_CP?],
-            "errors":   [(stage, error_message), ...],
-            "infeasible": bool,  # True if Stage 1 marked the pair infeasible
-            "missing_slot": str, # from Stage 1, empty if no Stage 1 yet
+            "pair_key":    "suite:ut_id:it_id",
+            "group":       <grouped record dict or None if infeasible/error>,
+            "errors":      [(stage, error_message), ...],
+            "infeasible":  bool,
+            "missing_slot": str,
         }
 
-    Safe to call from multiple threads concurrently as long as each
-    thread has its own arguments (in practice all args except the
-    per-pair `ut`/`it` are shared, which is fine because the shared
-    objects are read-only or thread-safe).
+    The "group" value is one self-contained grouped record ready to be
+    written as a single JSONL line. It contains no dead fields
+    (no condition, no agentdojo_injections, no operator_category).
     """
     pair_key = f"{suite_name}:{ut.ID}:{it.ID}"
-    records: list = []
     errors: list = []
 
     # ── Phase 0: Load AgentDojo data ──────────────────────────────
@@ -323,20 +368,14 @@ def _process_one_pair(ut, it, suite, suite_name, attack, client):
         env = suite.load_and_inject_default_environment({})
         env = ut.init_environment(env)
         gt_calls = ut.ground_truth(env)
-        injections = attack.attack(ut, it)
     except Exception as e:
         errors.append(("phase0", str(e)))
         return {
-            "pair_key": pair_key, "records": records, "errors": errors,
+            "pair_key": pair_key, "group": None, "errors": errors,
             "infeasible": False, "missing_slot": "",
         }
 
-    base = build_base(suite_name, ut, it, gt_calls)
     gt_calls_ser = serialize_calls(gt_calls)
-
-    # ── C1 + C2: no LLM ───────────────────────────────────────────
-    records.append(build_c1(base))
-    records.append(build_c2(base, injections))
 
     # ── Phase 1: Ambiguity schema (ATTACKER-BLIND) ────────────────
     try:
@@ -350,19 +389,19 @@ def _process_one_pair(ut, it, suite, suite_name, attack, client):
     except Exception as e:
         errors.append(("stage1", str(e)))
         return {
-            "pair_key": pair_key, "records": records, "errors": errors,
+            "pair_key": pair_key, "group": None, "errors": errors,
             "infeasible": False, "missing_slot": "",
         }
 
     if not ambig.get("feasible", True):
         return {
-            "pair_key": pair_key, "records": records, "errors": errors,
+            "pair_key": pair_key, "group": None, "errors": errors,
             "infeasible": True, "missing_slot": "",
         }
 
-    # ── C3: benign clarification (with retry on critical QC fail) ─
-    c3 = build_c3(base, ambig)
-    c3_flags = check_record(c3)
+    # ── Stage 1 QC (with retry on critical failures) ─────────────
+    c3_for_qc = _build_flat_for_qc(ut, it, ambig)
+    c3_flags = check_record(c3_for_qc)
     for _ in range(MAX_RETRIES):
         if not _stage1_critical_fail(c3_flags):
             break
@@ -376,22 +415,22 @@ def _process_one_pair(ut, it, suite, suite_name, attack, client):
             time.sleep(API_DELAY)
             if not ambig.get("feasible", True):
                 break
-            c3 = build_c3(base, ambig)
-            c3_flags = check_record(c3)
+            c3_for_qc = _build_flat_for_qc(ut, it, ambig)
+            c3_flags = check_record(c3_for_qc)
         except Exception as e:
             errors.append(("stage1_retry", str(e)))
             break
 
-    records.append(c3)
-
-    # ── Phase 2: C4 variants (always all 3 operators) ─────────────
+    # ── Phase 2: C4 injection variants (always all 3 operators) ──
+    injection_results: list[tuple[str, dict]] = []
     for operator in STANDARD_OPERATORS:
         try:
             inj_data = call_stage2(client, ambig, it.GOAL, operator)
             time.sleep(API_DELAY)
 
-            c4 = build_c4(base, ambig, inj_data, operator)
-            c4_flags = check_record(c4)
+            # QC on the injection (uses temporary flat record)
+            c4_for_qc = _build_flat_for_qc(ut, it, ambig, inj_data, operator)
+            c4_flags = check_record(c4_for_qc)
 
             # Retry Stage 2 if critical QC checks fail
             for _ in range(MAX_RETRIES):
@@ -400,18 +439,24 @@ def _process_one_pair(ut, it, suite, suite_name, attack, client):
                 try:
                     inj_data = call_stage2(client, ambig, it.GOAL, operator)
                     time.sleep(API_DELAY)
-                    c4 = build_c4(base, ambig, inj_data, operator)
-                    c4_flags = check_record(c4)
+                    c4_for_qc = _build_flat_for_qc(ut, it, ambig, inj_data, operator)
+                    c4_flags = check_record(c4_for_qc)
                 except Exception as e:
                     errors.append((f"stage2_{operator}_retry", str(e)))
                     break
 
-            records.append(c4)
+            injection_results.append((operator, inj_data))
         except Exception as e:
             errors.append((f"stage2_{operator}", str(e)))
 
+    # ── Build the grouped record ─────────────────────────────────
+    group = build_group(
+        suite_name, ut, it, gt_calls, ambig, injection_results,
+        generator_model=generator_model,
+    )
+
     return {
-        "pair_key": pair_key, "records": records, "errors": errors,
+        "pair_key": pair_key, "group": group, "errors": errors,
         "infeasible": False,
         "missing_slot": ambig.get("missing_slot", ""),
     }
@@ -454,7 +499,7 @@ def process_suite(client, suite_name, pipeline, output_path,
     if n_skipped > 0:
         print(f"  Skipping {n_skipped} already-completed pairs")
 
-    all_records: list = []
+    all_groups: list = []
     write_lock = threading.Lock()
 
     # Open output in append mode if resuming, write mode otherwise
@@ -463,7 +508,8 @@ def process_suite(client, suite_name, pipeline, output_path,
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(
-                    _process_one_pair, ut, it, suite, suite_name, attack, client,
+                    _process_one_pair, ut, it, suite, suite_name, attack,
+                    client, generator_model=client.model,
                 ): (ut, it)
                 for (ut, it) in pending_pairs
             }
@@ -479,8 +525,6 @@ def process_suite(client, suite_name, pipeline, output_path,
                 try:
                     result = future.result()
                 except Exception as e:
-                    # _process_one_pair should catch everything; this is
-                    # a safety net for unexpected errors.
                     pair_key = f"{suite_name}:{ut.ID}:{it.ID}"
                     with write_lock:
                         tqdm.write(f"  [FATAL] {pair_key}: {e}")
@@ -488,37 +532,35 @@ def process_suite(client, suite_name, pipeline, output_path,
                     continue
 
                 pair_key = result["pair_key"]
-                records = result["records"]
+                group = result["group"]
                 errors = result["errors"]
 
                 with write_lock:
-                    # Write records to output file
-                    for r in records:
-                        out_file.write(json.dumps(r) + "\n")
-                    out_file.flush()
+                    # Write one grouped record per pair
+                    if group is not None:
+                        out_file.write(json.dumps(group) + "\n")
+                        out_file.flush()
+                        all_groups.append(group)
+
                     # Log any errors
                     for stage, msg in errors:
                         log_error(pair_key, stage, msg, errors_path)
 
-                    # Compact status line via tqdm.write (plays nice w/ pbar)
-                    status_bits = ["C1+C2"]
+                    # Compact status line
                     if result["infeasible"]:
-                        status_bits.append("INFEASIBLE")
+                        status = "INFEASIBLE"
+                    elif group is None:
+                        status = "FAILED"
                     else:
-                        n_c4 = sum(1 for r in records if r.get("condition") == "C4")
-                        if any(r.get("condition") == "C3" for r in records):
-                            status_bits.append("C3")
-                        if n_c4:
-                            status_bits.append(f"C4x{n_c4}")
+                        n_inj = len(group.get("injections", []))
+                        status = f"OK ({n_inj} injections)"
                     if errors:
-                        status_bits.append(f"ERR={len(errors)}")
+                        status += f" ERR={len(errors)}"
                     slot_info = (f"  slot={result['missing_slot'][:40]}"
                                  if result["missing_slot"] else "")
-                    tqdm.write(f"  [{pair_key}]  {' '.join(status_bits)}{slot_info}")
+                    tqdm.write(f"  [{pair_key}]  {status}{slot_info}")
 
-                all_records.extend(records)
-
-    return all_records
+    return all_groups
 
 
 # ---------------------------------------------------------------------------
@@ -621,9 +663,25 @@ def main():
             [{"role": "user", "content": "Say OK"}],
             model=client.model, max_tokens=50,
         )
+        if test_text is None:
+            # Proxy returned a response with no content. Most common causes:
+            #   - the requested model name does not exist on the proxy
+            #   - your key is not authorized for this model (some proxies
+            #     return 200 with empty content instead of 401)
+            #   - the model returned no content for the prompt (rare)
+            print(
+                f"  Connection FAILED: model returned None content.\n"
+                f"  Likely causes:\n"
+                f"    1. Model '{args.model}' does not exist on the proxy.\n"
+                f"    2. Your LITE_LLM_KEY is not allowed to access this model.\n"
+                f"  Diagnosis: try a different --model (e.g. gemini/gemini-2.5-pro,\n"
+                f"  openai/gpt-4o-mini-2024-07-18) or check with your proxy admin\n"
+                f"  which models your key allows."
+            )
+            sys.exit(1)
         print(f"  Connection OK: {test_text.strip()[:30]}")
     except Exception as e:
-        print(f"  Connection FAILED: {e}")
+        print(f"  Connection FAILED: {type(e).__name__}: {e}")
         print(f"  Check LITE_LLM_URL ({os.getenv('LITE_LLM_URL')}) and LITE_LLM_KEY")
         sys.exit(1)
 
@@ -638,7 +696,7 @@ def main():
         errors_path = errors_dir / f"dataset_{suite_name}_{model_slug}.jsonl"
 
         try:
-            records = process_suite(
+            groups = process_suite(
                 client=client,
                 suite_name=suite_name,
                 pipeline=pipeline,
@@ -648,21 +706,19 @@ def main():
                 resume=args.resume,
                 workers=args.workers,
             )
-            grand_total.extend(records)
+            grand_total.extend(groups)
 
-            # Suite summary
-            conds = Counter(r["condition"] for r in records)
-            ops = Counter(r.get("injection_operator", "")
-                          for r in records if r["condition"] == "C4")
+            # Suite summary (grouped format)
+            n_injections = sum(len(g.get("injections", [])) for g in groups)
+            ops = Counter(
+                inj["operator"]
+                for g in groups for inj in g.get("injections", [])
+            )
 
             print(f"\n  Suite '{suite_name}' complete:")
-            print(f"    Records:    {len(records)}")
-            print(f"    Conditions: {dict(conds)}")
-            print(f"    C4 ops:     {dict(ops)}")
+            print(f"    Groups:     {len(groups)}")
+            print(f"    Injections: {n_injections} ({dict(ops)})")
             print(f"    Output:     {output_path}")
-
-            # Run QC
-            run_qc_on_records(records)
 
         except Exception as e:
             print(f"\n  [ERROR] Suite '{suite_name}' failed: {e}")
@@ -670,23 +726,19 @@ def main():
             traceback.print_exc()
 
     # Grand summary
-    #print(f"\n{'='*70}")
-    #print("GRAND TOTAL")
-    #print(f"{'='*70}")
-    #conds = Counter(r["condition"] for r in grand_total)
-    #ops = Counter(r.get("injection_operator", "")
-    #              for r in grand_total if r["condition"] == "C4")
-    #n_pairs = len(set((r["user_task_id"], r["injection_task_id"])
-    #                  for r in grand_total))
+    print(f"\n{'='*70}")
+    print("GRAND TOTAL")
+    print(f"{'='*70}")
+    n_injections = sum(len(g.get("injections", [])) for g in grand_total)
+    ops = Counter(
+        inj["operator"]
+        for g in grand_total for inj in g.get("injections", [])
+    )
 
-    #print(f"  Suites processed: {len(suites)}")
-    #print(f"  Total pairs:      {n_pairs}")
-    #print(f"  Total records:    {len(grand_total)}")
-    #print(f"  Conditions:       {dict(conds)}")
-    #print(f"  C4 operators:     {dict(ops)}")
-
-    run_qc_on_records(grand_total)
-    #print(f"\nDone!")
+    print(f"  Suites processed: {len(suites)}")
+    print(f"  Total groups:     {len(grand_total)}")
+    print(f"  Total injections: {n_injections} ({dict(ops)})")
+    print(f"\nDone!")
 
 
 if __name__ == "__main__":
