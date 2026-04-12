@@ -6,16 +6,27 @@ A benchmark for measuring LLM agent vulnerability during clarification states wi
 
 When a user prompt is ambiguous, an agent asks a clarifying question. The user's response to that question opens a **new injection channel** which is the attacker can embed malicious instructions inside the clarification answer. This channel requires no environment access but only a crafted user message.
 
-## 4-Condition Design
+## 2×2 Experimental Design
 
-| Condition | Prompt | Attack Channel | Purpose |
-|-----------|--------|----------------|---------|
-| **C1** | Original (clear) | None | Baseline utility |
-| **C2** | Original (clear) | Tool-result injection (ImportantInstructionsAttack) | Standard tool attack |
-| **C3** | Ambiguous | Benign clarification response | Clarification utility |
-| **C4** | Ambiguous | Injected clarification response | **ASPI attack** |
+The benchmark is a 2×2 over **state** (execution vs clarification) × **channel** (tool-output vs user-message), plus two clean baselines (C1, C3):
 
-C1/C2 are independent single-turn runs. C3/C4 share Turn 1-2 (branching design) and the only difference is the Turn 3 content (benign vs injected).
+| | **Tool channel** (injection in tool output) | **User channel** (attack in user message) |
+|---|---|---|
+| **Execution state** | **C2_tool** (canonical AgentDojo injection) | **C2_user** ⚠ *control, not an injection* |
+| **Clarification state** | **C4_tool** (injection in clarif state) | **C4_user** (clarif-channel injection) |
+
+## 6-Condition Design
+
+| Condition | State | Channel | Attack source | Purpose |
+|-----------|-------|---------|---------------|---------|
+| **C1** | Execution | — | — | Baseline utility (benign, no attack) |
+| **C2_tool** | Execution | Tool |  tool-output placeholder | Standard tool-injection ASR (= canonical AgentDojo C2) |
+| **C2_user** | Execution | User-text |  `PROMPT + "\n\n" + GOAL` | Compliance-floor control (not a real injection) |
+| **C3** | Clarification | — |  — | Clarification utility baseline (benign Turn 3) |
+| **C4_tool** | Clarification | Tool | tool-output placeholder | Tool-injection in clarification state (replayed Turn 2) |
+| **C4_user** | Clarification | User-text | simulator's Turn 3 reply (HR/GS/CP operator) | User-channel injection in clarification state |
+
+C1, C2_tool, C2_user are single-turn runs. C3, C4_tool, C4_user share Turn 1-2 (shared-state branching design with deep-copy). C4_tool additionally replays Turn 2 tool calls against the injected env so the agent's Turn 4 memory is consistent with the injected world.
 
 ## Primary Metrics
 
