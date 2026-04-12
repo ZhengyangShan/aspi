@@ -101,13 +101,13 @@ ai-safety/
   ```
 - **LiteLLM proxy** credentials in `.env` at the repo root:
   ```bash
-  cp .env.example .env
-  # then edit .env and fill in:
-  #   LITE_LLM_KEY=...
-  #   LITE_LLM_URL=https://your-proxy-url   # without /v1
+  cat > .env << 'EOF'
+  LITE_LLM_KEY=your-actual-key-here
+  LITE_LLM_URL=https://litellm-proxy.ml.scale.com
+  EOF
   ```
 
-All scripts auto-load `.env` at import time. You can run them from any directory.
+Replace the two values with your real credentials. This creates ```.env``` at your current directory.
 
 ### Step 1: Dataset Construction
 
