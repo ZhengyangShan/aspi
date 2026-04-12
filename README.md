@@ -113,10 +113,10 @@ All scripts auto-load `.env` at import time. You can run them from any directory
 
 ```bash
 # Quick test: 5 pairs from workspace
-python scripts/build_dataset.py --model gemini/gemini-3.1-pro --suite workspace --limit 5
+python scripts/build_dataset.py --model gemini/gemini-3.1-pro-preview --suite workspace --limit 5
 
 # Full run, 4 parallel workers
-python scripts/build_dataset.py --model gemini/gemini-3.1-pro --suite all --workers 4
+python scripts/build_dataset.py --model gemini/gemini-3.1-pro-preview --suite all --workers 4
 ```
 
 **Output:** `data/aspi_{suite}_{model}.jsonl` (default: repo-root `data/`)
