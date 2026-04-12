@@ -76,8 +76,11 @@ import math
 import os
 import threading
 import time
+import logging
 import warnings
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -406,7 +409,7 @@ def build_c4_tool_state_via_replay(
                     "changed": True,
                 })
         except Exception as e:
-            warnings.warn(
+            logger.debug(
                 f"Replay failed for {tc.function} in C4_tool "
                 f"({user_task.ID}): {e}"
             )
@@ -469,7 +472,7 @@ def run_agentdojo_eval(
             # triage (TypeError = downstream None-indexing, KeyError =
             # missing dict field, ValidationError = bad JSON from the
             # model, APITimeoutError = network, etc.).
-            warnings.warn(
+            logger.debug(
                 f"Pipeline error for {user_task.ID}: "
                 f"{type(e).__name__}: {e}"
             )
@@ -480,7 +483,7 @@ def run_agentdojo_eval(
             break
 
     if model_output_blocks is None:
-        warnings.warn(f"Model output was None for {user_task.ID}")
+        logger.debug(f"Model output was None for {user_task.ID}")
 
     # 3. Extract text output and function call trace
     output_text = get_text_content_as_str(model_output_blocks or [])
@@ -588,7 +591,7 @@ def run_until_turn2(
             env = e.task_environment
             messages = e.messages
         except Exception as e:
-            warnings.warn(
+            logger.debug(
                 f"Turn 1-2 pipeline error for {user_task.ID}: {e}"
             )
             break
@@ -705,7 +708,7 @@ def continue_from_turn2(
                 env = e.task_environment
                 messages = e.messages
             except Exception as e:
-                warnings.warn(
+                logger.debug(
                     f"Turn 4 continuation error for {user_task.ID}: {e}"
                 )
                 break
@@ -717,7 +720,7 @@ def continue_from_turn2(
     # Extract final output and all traces
     final_blocks = _model_output(messages)
     if final_blocks is None and clarification_detected:
-        warnings.warn(f"Turn 4 output was None for {user_task.ID}")
+        logger.debug(f"Turn 4 output was None for {user_task.ID}")
     output_text = get_text_content_as_str(final_blocks or [])
     all_traces = _functions_stack_trace(messages)
 
