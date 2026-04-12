@@ -146,7 +146,7 @@ python scripts/run_eval.py \
 Annotates each result with richer attack/utility classifications.
 
 ```bash
-python scripts/run_judge.py results/eval/agentdojo_eval_gpt-4o-2024-05-13.jsonl \
+python scripts/run_judge.py results/eval/aspi_eval_gpt-4o-2024-05-13.jsonl \
     --model openai/gpt-4o-mini-2024-07-18 --backend litellm --workers 4
 ```
 
@@ -156,28 +156,38 @@ python scripts/run_judge.py results/eval/agentdojo_eval_gpt-4o-2024-05-13.jsonl 
 ### Step 4: Analysis
 
 ```bash
+
+# Sumary table without LLM judge results
+python scripts/analyze.py \
+    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
+    --add "Gemini-Flash-Lite" results/judged/aspi_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
+    --summary \
+    --plot all
+
 # Summary table (all models)
 python scripts/analyze.py \
-    --add "GPT-4o" results/judged/agentdojo_eval_gpt-4o-2024-05-13_judged.jsonl \
+    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
     --add "Gemini-Flash-Lite" results/judged/agentdojo_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
     --summary
 
 # Detailed view for one model
 python scripts/analyze.py \
-    --add "GPT-4o" results/judged/agentdojo_eval_gpt-4o-2024-05-13_judged.jsonl \
+    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
     --detail "GPT-4o"
 
 # Trace metrics (attempted vs succeeded)
 python scripts/analyze.py \
-    --add "GPT-4o" results/judged/agentdojo_eval_gpt-4o-2024-05-13_judged.jsonl \
-    --add "Gemini-Flash-Lite" results/judged/agentdojo_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
+    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
+    --add "Gemini-Flash-Lite" results/judged/aspi_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
     --trace
 
 # Generate all plots
 python scripts/analyze.py \
-    --add "GPT-4o" results/judged/agentdojo_eval_gpt-4o-2024-05-13_judged.jsonl \
-    --add "Gemini-Flash-Lite" results/judged/agentdojo_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
+    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
+    --add "Gemini-Flash-Lite" results/judged/aspi_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
     --plot all
+
+
 ```
 
 **Output:** `results/plots/*.png` + terminal tables
@@ -265,18 +275,6 @@ python scripts/build_dataset.py --model MODEL [OPTIONS]
 
 **Output:** `data/aspi_{suite}_{model}.jsonl` — one file per suite.
 
-**Examples:**
-```bash
-# Quick test
-python scripts/build_dataset.py --model gemini/gemini-2.5-pro --suite workspace --limit 5
-
-# Full 4-suite run, 25 pairs each, 4 workers
-python scripts/build_dataset.py --model gemini/gemini-2.5-pro --suite all --limit 25 --workers 4
-
-# Resume interrupted run
-python scripts/build_dataset.py --model gemini/gemini-2.5-pro --suite all --limit 25 --resume
-```
-
 ---
 
 ### `scripts/run_eval.py` (Step 2: Evaluation)
@@ -304,32 +302,7 @@ python scripts/run_eval.py --dataset FILES [OPTIONS]
 
 **Environment:** `LITE_LLM_KEY` + `LITE_LLM_URL` (litellm) or provider API keys (agentdojo backend).
 
-**Output:** `results/eval/agentdojo_eval_{model}.jsonl` — one line per task group.
-
-**Examples:**
-```bash
-# GPT-4o via LiteLLM with simulator
-python scripts/run_eval.py \
-    --dataset data/aspi_*.jsonl \
-    --model gpt-4o-2024-05-13 \
-    --backend litellm \
-    --simulator-model openai/gpt-4o-mini-2024-07-18 \
-    --workers 4
-
-# Gemini via LiteLLM, workspace only, limit 10
-python scripts/run_eval.py \
-    --dataset data/aspi_workspace_*.jsonl \
-    --model gemini/gemini-2.5-flash-lite \
-    --backend litellm \
-    --suite workspace --limit 10
-
-# With a defense
-python scripts/run_eval.py \
-    --dataset data/aspi_*.jsonl \
-    --model gpt-4o-2024-05-13 \
-    --backend litellm \
-    --defense repeat_user_prompt
-```
+**Output:** `results/eval/aspi_eval_{model}.jsonl` — one line per task group.
 
 ---
 
@@ -362,20 +335,6 @@ Compliance reason (when FULL/PARTIAL): `CONFUSED` | `PERSUADED` | `NO_REASONING`
 
 Utility: `COMPLETED` | `ATTEMPTED` | `ABANDONED` | `NOT_ATTEMPTED`
 
-**Examples:**
-```bash
-# Judge all groups
-python scripts/run_judge.py results/eval/agentdojo_eval_gpt-4o-2024-05-13.jsonl
-
-# Judge first 10 only (for testing)
-python scripts/run_judge.py results/eval/agentdojo_eval_gpt-4o-2024-05-13.jsonl --limit 10
-
-# Custom output path
-python scripts/run_judge.py results.jsonl -o results_judged.jsonl
-
-# Direct OpenAI (no proxy)
-python scripts/run_judge.py results.jsonl --backend openai --model gpt-4o-mini-2024-07-18
-```
 
 ---
 
@@ -400,46 +359,6 @@ python scripts/analyze.py [OPTIONS]
 **No flags = `--summary`** (default).
 
 **Output:** Terminal tables + `results/plots/*.png`.
-
-**Examples:**
-```bash
-# Add models and get everything
-python scripts/analyze.py \
-    --add "GPT-4o" results/judged/agentdojo_eval_gpt-4o-2024-05-13_judged.jsonl \
-    --add "Gemini" results/judged/agentdojo_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
-    --summary --trace --plot all
-
-# Detail for one model
-python scripts/analyze.py --add "GPT-4o" results/judged/gpt4o_judged.jsonl --detail "GPT-4o"
-
-# Just the DASR plot
-python scripts/analyze.py --add "GPT-4o" results/judged/gpt4o_judged.jsonl --plot dasr
-
-# Custom plot directory
-python scripts/analyze.py --plot all --plot-dir paper_figures/
-```
-
----
-
-### `scripts/export_csv.py` (Utility: Dataset Review)
-
-Exports dataset JSONL to CSV for human review or spreadsheet inspection. Implementation: `aspi.dataset.export`.
-
-```bash
-python scripts/export_csv.py --input FILES [OPTIONS]
-```
-
-| Flag | Required | Default | Description |
-|------|----------|---------|-------------|
-| `--input FILES` | **Yes** | — | Path(s) to JSONL dataset files. Supports glob patterns (e.g. `output/*.jsonl`). |
-| `--output PATH` | No | `aspi_dataset_review.csv` | Output CSV path. |
-
-**Output:** CSV with columns: suite, user_task_id, injection_task_id, original_prompt, base_prompt, missing_slot, ground_truth_tools, attacker_goal.
-
-**Examples:**
-```bash
-python export_csv.py --input output/aspi_*_25pairs.jsonl --output review.csv
-```
 
 ---
 
