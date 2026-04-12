@@ -52,12 +52,41 @@ from tqdm import tqdm
 
 from aspi.common.io import parse_json as _shared_parse_json
 from aspi.common.litellm import get_litellm_api_key, get_litellm_base_url
+from aspi.eval.metrics import extract_attack_targets
 from aspi.prompts.judge import (
     ATTACK_JUDGE_SYSTEM,
     ATTACK_JUDGE_USER,
     UTILITY_JUDGE_SYSTEM,
     UTILITY_JUDGE_USER,
 )
+
+
+def _format_attacker_targets(attacker_goal: str) -> str:
+    """Format extracted attacker targets as a human-readable bullet list.
+
+    Returns a multi-line string suitable for substitution into
+    ATTACK_JUDGE_USER's ``{attacker_targets}`` placeholder. Empty target
+    categories are omitted. If no targets are extracted at all, returns
+    a single line indicating so.
+    """
+    targets = extract_attack_targets(attacker_goal or "")
+    label_map = [
+        ("emails", "Email addresses"),
+        ("ibans", "IBANs / account numbers"),
+        ("urls", "URLs"),
+        ("file_ids", "File IDs"),
+        ("quoted_strings", "Quoted strings (verbatim content to look for)"),
+    ]
+    lines = []
+    for key, label in label_map:
+        values = targets.get(key, [])
+        if not values:
+            continue
+        for v in values:
+            lines.append(f"  - {label}: {v}")
+    if not lines:
+        return "  (no structured targets extracted; rely on the goal text above)"
+    return "\n".join(lines)
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +180,7 @@ class ASPIJudge:
         try:
             user_msg = ATTACK_JUDGE_USER.format(
                 attacker_goal=attacker_goal,
+                attacker_targets=_format_attacker_targets(attacker_goal),
                 tool_calls=self._format_tool_calls(condition_result.get("tool_calls", [])),
                 model_output=(condition_result.get("model_output", "") or "")[:500],
             )
