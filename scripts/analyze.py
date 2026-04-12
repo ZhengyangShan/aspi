@@ -6,7 +6,7 @@ offline analysis of result files.
 
 Usage:
     python scripts/analyze.py \\
-        --add "GPT-4o" results/judged/agentdojo_eval_..._judged.jsonl \\
+        --add "GPT-4o" results/judged/aspi_eval_..._judged.jsonl \\
         --summary --plot all
 """
 

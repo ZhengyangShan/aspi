@@ -6,7 +6,7 @@ an eval results JSONL, annotates each group with judge classifications,
 writes a new JSONL with the ``_judged.jsonl`` suffix.
 
 Usage:
-    python scripts/run_judge.py results/eval/agentdojo_eval_*.jsonl \\
+    python scripts/run_judge.py results/eval/aspi_eval_*.jsonl \\
         --model openai/gpt-4o-mini-2024-07-18 --workers 4
 """
 
