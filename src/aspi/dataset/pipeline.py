@@ -670,23 +670,23 @@ def main():
             traceback.print_exc()
 
     # Grand summary
-    print(f"\n{'='*70}")
-    print("GRAND TOTAL")
-    print(f"{'='*70}")
-    conds = Counter(r["condition"] for r in grand_total)
-    ops = Counter(r.get("injection_operator", "")
-                  for r in grand_total if r["condition"] == "C4")
-    n_pairs = len(set((r["user_task_id"], r["injection_task_id"])
-                      for r in grand_total))
+    #print(f"\n{'='*70}")
+    #print("GRAND TOTAL")
+    #print(f"{'='*70}")
+    #conds = Counter(r["condition"] for r in grand_total)
+    #ops = Counter(r.get("injection_operator", "")
+    #              for r in grand_total if r["condition"] == "C4")
+    #n_pairs = len(set((r["user_task_id"], r["injection_task_id"])
+    #                  for r in grand_total))
 
-    print(f"  Suites processed: {len(suites)}")
-    print(f"  Total pairs:      {n_pairs}")
-    print(f"  Total records:    {len(grand_total)}")
-    print(f"  Conditions:       {dict(conds)}")
-    print(f"  C4 operators:     {dict(ops)}")
+    #print(f"  Suites processed: {len(suites)}")
+    #print(f"  Total pairs:      {n_pairs}")
+    #print(f"  Total records:    {len(grand_total)}")
+    #print(f"  Conditions:       {dict(conds)}")
+    #print(f"  C4 operators:     {dict(ops)}")
 
     run_qc_on_records(grand_total)
-    print(f"\nDone!")
+    #print(f"\nDone!")
 
 
 if __name__ == "__main__":
