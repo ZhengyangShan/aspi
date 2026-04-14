@@ -181,68 +181,133 @@ def cmd_list(all_data):
 
 
 def cmd_summary(all_data):
-    """Summary tables: Utility and ASR for all 6 conditions, plus DASR deltas.
+    """Summary tables — split into 4 focused blocks with self-describing headers.
 
-    Condition naming (state × channel):
-        EB  = exec_benign          (baseline, no attack)
-        ETA = exec_tool_attack     (standard AgentDojo tool injection)
-        EUA = exec_user_attack     (user states attacker goal — compliance control)
-        CB  = clarif_benign        (clarification, benign user answer)
-        CTA = clarif_tool_attack   (tool injection during clarification)
-        CUA = clarif_user_attack   (operator-framed user-channel injection)
-
-    Printed as two side-by-side blocks: Utility then ASR + Deltas.
+    (1) CLARIFICATION: n, clarif%, ask_user%, n_clarified
+    (2) UTILITY (%) across all 6 conditions (exec × {clean,tool,user} + clarif × same)
+    (3) ATTACK SUCCESS RATE (%) across the 4 attacked conditions
+    (4) DELTAS (pp) — five paired deltas isolating state/channel/combined effects
     """
     models = list(all_data.keys())
-    cw = 8  # column width
+    model_w = max(22, max(len(m) for m in models) + 2)
 
-    # ── Table 1: Utility ─────────────────────────────────────────
-    u_metrics = [
-        ("n",      lambda s: s["n_groups"]),
-        ("clarif", lambda s: r(g(s, "clarif_rate"))),
-        ("n_cl",   lambda s: s.get("n_clarified", "--")),
-        ("u(EB)",  lambda s: r(g(s, "u_c1"))),
-        ("u(ETA)", lambda s: r(g(s, "u_c2"))),
-        ("u(EUA)", lambda s: r(g(s, "u_c2_user"))),
-        ("u(CB)",  lambda s: r(g(s, "u_c3"))),
-        ("u(CTA)", lambda s: r(g(s, "u_c4_tool"))),
-        ("u(CUA)", lambda s: r(g(s, "u_c4_user_group_mean", "u_c4"))),
-    ]
-    header = f"{'Model':<20}" + "".join(f"{m[0]:>{cw}}" for m in u_metrics)
-    print(f"\n{'─'*len(header)}")
-    print(f"UTILITY")
-    print(f"{'─'*len(header)}")
-    print(header)
-    print("-" * len(header))
+    def pct(metric):
+        """Rate (0-1 dict or float) → 'NN.N' string, or '--'."""
+        v = None
+        if isinstance(metric, dict):
+            v = metric.get("rate")
+        elif isinstance(metric, (int, float)):
+            v = metric
+        return f"{v*100:.1f}" if v is not None else "--"
+
+    def pp(val):
+        """Signed pp delta (already in [-1, 1]) → '+NN.N' string, or '--'."""
+        if val is None:
+            return "--"
+        if isinstance(val, dict):
+            val = val.get("rate")
+            if val is None:
+                return "--"
+        return f"{val*100:+.1f}"
+
+    def print_table(title, columns, rows, col_widths):
+        """
+        columns: list of header strings
+        rows: list of (model_name, [cell strings])
+        col_widths: list of column widths matching columns
+        """
+        header = f"{'Model':<{model_w}}" + "".join(
+            f"{h:>{w}}" for h, w in zip(columns, col_widths)
+        )
+        total = len(header)
+        print(f"\n{'─'*total}")
+        print(title)
+        print(f"{'─'*total}")
+        print(header)
+        print("-" * total)
+        for name, cells in rows:
+            print(
+                f"{name:<{model_w}}"
+                + "".join(f"{c:>{w}}" for c, w in zip(cells, col_widths))
+            )
+
+    # ── Table 1: Clarification ───────────────────────────────────
+    clar_cols = ["n", "clarif%", "ask_user%", "n_clarified"]
+    clar_widths = [6, 10, 12, 14]
+    clar_rows = []
     for name in models:
         s = all_data[name]["summary"]
-        print(f"{name:<20}" + "".join(f"{m[1](s):>{cw}}" for m in u_metrics))
+        clar_rows.append((name, [
+            str(s.get("n_groups", "--")),
+            pct(g(s, "clarif_rate")),
+            pct(s.get("ask_user_rate")),
+            str(s.get("n_clarified", "--")),
+        ]))
+    print_table("CLARIFICATION", clar_cols, clar_rows, clar_widths)
 
-    # ── Table 2: ASR + Deltas ────────────────────────────────────
-    a_metrics = [
-        ("ASR(ETA)", lambda s: r(g(s, "asr_c2"))),
-        ("ASR(EUA)", lambda s: r(g(s, "asr_c2_user"))),
-        ("ASR(CTA)", lambda s: r(g(s, "asr_c4_tool"))),
-        ("ASR(CUA)", lambda s: r(g(s, "asr_c4_user_group_any", "c4_any_attack_success", "asr_c4"))),
-        ("Dst",      lambda s: r(g(s, "dasr_state", "delta_asr_any"))),
-        ("DstU",     lambda s: r(g(s, "dasr_state_user"))),
-        ("Dch",      lambda s: r(g(s, "dasr_channel"))),
-        ("DchE",     lambda s: r(g(s, "dasr_channel_exec"))),
-        ("Dcb",      lambda s: r(g(s, "dasr_combined", "delta_asr_any"))),
+    # ── Table 2: Utility (%) ─────────────────────────────────────
+    util_cols = [
+        "exec_clean", "exec_tool", "exec_user",
+        "clarif_clean", "clarif_tool", "clarif_user",
     ]
-    header2 = f"{'Model':<20}" + "".join(f"{m[0]:>{cw}}" for m in a_metrics)
-    print(f"\n{'─'*len(header2)}")
-    print(f"ASR + DELTAS")
-    print(f"{'─'*len(header2)}")
-    print(header2)
-    print("-" * len(header2))
+    util_widths = [12, 11, 11, 14, 13, 13]
+    util_keys = [
+        ("u_c1",),
+        ("u_c2",),
+        ("u_c2_user",),
+        ("u_c3",),
+        ("u_c4_tool",),
+        ("u_c4_user_group_mean", "u_c4"),
+    ]
+    util_rows = []
     for name in models:
         s = all_data[name]["summary"]
-        print(f"{name:<20}" + "".join(f"{m[1](s):>{cw}}" for m in a_metrics))
+        util_rows.append((name, [pct(g(s, *ks)) for ks in util_keys]))
+    print_table("UTILITY (%)", util_cols, util_rows, util_widths)
 
-    print(f"\nConditions:  EB=exec_benign  ETA=exec_tool_attack  EUA=exec_user_attack")
-    print(f"             CB=clarif_benign  CTA=clarif_tool_attack  CUA=clarif_user_attack")
-    print(f"Deltas:  Dst=CTA-ETA  DstU=CUA-EUA  Dch=CUA-CTA  DchE=EUA-ETA  Dcb=CUA-ETA")
+    # ── Table 3: Attack Success Rate (%) ─────────────────────────
+    asr_cols = ["exec_tool", "exec_user", "clarif_tool", "clarif_user"]
+    asr_widths = [11, 11, 13, 13]
+    asr_keys = [
+        ("asr_c2",),
+        ("asr_c2_user",),
+        ("asr_c4_tool",),
+        ("asr_c4_user_group_any", "c4_any_attack_success", "asr_c4"),
+    ]
+    asr_rows = []
+    for name in models:
+        s = all_data[name]["summary"]
+        asr_rows.append((name, [pct(g(s, *ks)) for ks in asr_keys]))
+    print_table("ATTACK SUCCESS RATE (%)", asr_cols, asr_rows, asr_widths)
+
+    # ── Table 4: Deltas (pp) ─────────────────────────────────────
+    delta_cols = [
+        "state_tool",       # dasr_state:       clarif_tool - exec_tool
+        "state_user",       # dasr_state_user:  clarif_user - exec_user
+        "channel_clarif",   # dasr_channel:     clarif_user - clarif_tool
+        "channel_exec",     # dasr_channel_exec exec_user - exec_tool
+        "combined",         # dasr_combined:    clarif_user - exec_tool
+    ]
+    delta_widths = [12, 12, 16, 14, 10]
+    delta_keys = [
+        ("dasr_state", "delta_asr_any"),
+        ("dasr_state_user",),
+        ("dasr_channel",),
+        ("dasr_channel_exec",),
+        ("dasr_combined", "delta_asr_any"),
+    ]
+    delta_rows = []
+    for name in models:
+        s = all_data[name]["summary"]
+        delta_rows.append((name, [pp(g(s, *ks)) for ks in delta_keys]))
+    print_table("DELTAS (pp, clarif − exec)", delta_cols, delta_rows, delta_widths)
+
+    print("\nDelta definitions:")
+    print("  state_tool      = ASR(clarif_tool) − ASR(exec_tool)     # state effect, tool channel")
+    print("  state_user      = ASR(clarif_user) − ASR(exec_user)     # state effect, user channel")
+    print("  channel_clarif  = ASR(clarif_user) − ASR(clarif_tool)   # channel effect, in clarification")
+    print("  channel_exec    = ASR(exec_user)   − ASR(exec_tool)     # channel effect, in execution")
+    print("  combined        = ASR(clarif_user) − ASR(exec_tool)     # combined state + channel")
 
 
 def cmd_detail(all_data, model_name):
@@ -292,6 +357,10 @@ def cmd_detail(all_data, model_name):
             asr = m.get("asr_c4_user", m.get("asr_c4", {}))
             d = m.get("dasr_combined", m.get("delta_asr", 0))
             print(f"    {op:<5} ASR={ci(asr):<25} DASR={d:+.4f}")
+
+    # ask_user decomposition of clarif_rate
+    if s.get("ask_user_rate") is not None:
+        print(f"\n  {'ask_user_rate (tool only)':<24} {s['ask_user_rate']:>9.1%}")
 
 
 def cmd_trace(all_data):
