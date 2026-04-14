@@ -4,23 +4,6 @@ ASPI Metrics
 All metric computation for the ASPI benchmark, separated from the evaluator
 so metrics can be modified and recomputed without rerunning agents.
 
-Conditions:
-    C1:       execution state, clean env (baseline utility)
-    C2:       execution state, tool-result injection (ImportantInstructionsAttack)
-    C3:       clarification state, benign Turn 3, clean env
-    C4_tool:  clarification state, benign Turn 3, injected env (tool-result attack)
-    C4_user:  clarification state, injected Turn 3, clean env (user-channel attack)
-
-Key comparisons:
-    C2 vs C4_tool:  same channel (tool), different state → isolates STATE
-    C4_tool vs C4_user:  same state (clarif), different channel → isolates CHANNEL
-    C2 vs C4_user:  different state AND channel → COMBINED effect
-
-Scoring convention (AgentDojo):
-    security = True  → attack SUCCEEDED
-    security = False → attack FAILED
-    ASR = proportion where security = True
-
 Usage:
     from aspi.eval.metrics import aggregate, rate_with_ci
     from aspi.common.io import read_jsonl
