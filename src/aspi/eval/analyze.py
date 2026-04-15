@@ -245,40 +245,82 @@ def cmd_summary(all_data):
         ]))
     print_table("CLARIFICATION", clar_cols, clar_rows, clar_widths)
 
-    # ── Table 2: Utility (%) ─────────────────────────────────────
+    # ── Table 2a: Utility (%) — ALL GROUPS (n) ───────────────────
     util_cols = [
         "exec_clean", "exec_tool", "exec_user",
         "clarif_clean", "clarif_tool", "clarif_user",
     ]
     util_widths = [12, 11, 11, 14, 13, 13]
-    util_keys = [
+    util_keys_all = [
         ("u_c1",),
         ("u_c2",),
         ("u_c2_user",),
         ("u_c3",),
-        ("u_c4_tool",),
+        ("u_c4_tool_all",),
         ("u_c4_user_group_mean", "u_c4"),
     ]
-    util_rows = []
+    util_rows_all = []
     for name in models:
         s = all_data[name]["summary"]
-        util_rows.append((name, [pct(g(s, *ks)) for ks in util_keys]))
-    print_table("UTILITY (%)", util_cols, util_rows, util_widths)
+        util_rows_all.append((name, [pct(g(s, *ks)) for ks in util_keys_all]))
+    print_table(
+        "UTILITY (%) — ALL GROUPS (n=n_groups; clarif_tool: skipped→u_c3)",
+        util_cols, util_rows_all, util_widths,
+    )
 
-    # ── Table 3: Attack Success Rate (%) ─────────────────────────
+    # ── Table 2b: Utility (%) — CLARIFIED ONLY (n_clarified) ─────
+    util_keys_cond = [
+        ("u_c1_cond",),
+        ("u_c2_cond",),
+        ("u_c2_user_cond",),
+        ("u_c3_cond",),
+        ("u_c4_tool_cond", "u_c4_tool"),
+        ("u_c4_user_cond",),
+    ]
+    util_rows_cond = []
+    for name in models:
+        s = all_data[name]["summary"]
+        row_label = f"{name}"
+        util_rows_cond.append((row_label, [pct(g(s, *ks)) for ks in util_keys_cond]))
+    print_table(
+        "UTILITY (%) — CLARIFIED SUBSET ONLY (n_clarified)",
+        util_cols, util_rows_cond, util_widths,
+    )
+
+    # ── Table 3a: ASR (%) — ALL GROUPS (n) ───────────────────────
     asr_cols = ["exec_tool", "exec_user", "clarif_tool", "clarif_user"]
     asr_widths = [11, 11, 13, 13]
-    asr_keys = [
+    asr_keys_all = [
         ("asr_c2",),
         ("asr_c2_user",),
-        ("asr_c4_tool",),
+        ("asr_c4_tool_all",),   # skipped → 0 over n
         ("asr_c4_user_group_any", "c4_any_attack_success", "asr_c4"),
     ]
-    asr_rows = []
+    asr_rows_all = []
     for name in models:
         s = all_data[name]["summary"]
-        asr_rows.append((name, [pct(g(s, *ks)) for ks in asr_keys]))
-    print_table("ATTACK SUCCESS RATE (%)", asr_cols, asr_rows, asr_widths)
+        asr_rows_all.append((name, [pct(g(s, *ks)) for ks in asr_keys_all]))
+    print_table(
+        "ATTACK SUCCESS RATE (%) — ALL GROUPS (n=n_groups; clarif_*: skipped→ASR=0)",
+        asr_cols, asr_rows_all, asr_widths,
+    )
+
+    # ── Table 3b: ASR (%) — CLARIFIED ONLY (n_clarified) ─────────
+    asr_keys_cond = [
+        ("asr_c2_cond",),
+        ("asr_c2_user_cond",),
+        ("asr_c4_tool_cond", "asr_c4_tool"),  # both point to the n_c4_tool_run version
+        ("asr_c4_user_cond",),
+    ]
+    asr_rows_cond = []
+    for name in models:
+        s = all_data[name]["summary"]
+        row_label = f"{name}"
+        asr_rows_cond.append((row_label, [pct(g(s, *ks)) for ks in asr_keys_cond]))
+    print_table(
+        "ATTACK SUCCESS RATE (%) — CLARIFIED SUBSET ONLY (same n_clarified)",
+        asr_cols, asr_rows_cond, asr_widths,
+    )
 
     # ── Table 4: Deltas (pp) ─────────────────────────────────────
     delta_cols = [
