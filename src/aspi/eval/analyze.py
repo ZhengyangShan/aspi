@@ -121,6 +121,25 @@ def ci(metric):
     if not isinstance(metric, dict) or metric.get("rate") is None: return "--"
     return f"{metric['rate']:.1%} [{metric['ci_low']:.1%}, {metric['ci_high']:.1%}]"
 
+def pct(metric):
+    """Rate (0-1 dict or float) → 'NN.N' string, or '--'."""
+    v = None
+    if isinstance(metric, dict):
+        v = metric.get("rate")
+    elif isinstance(metric, (int, float)):
+        v = metric
+    return f"{v*100:.1f}" if v is not None else "--"
+
+def pp(val):
+    """Signed percentage-point delta (already in [-1, 1]) → '+NN.N' string, or '--'."""
+    if val is None:
+        return "--"
+    if isinstance(val, dict):
+        val = val.get("rate")
+        if val is None:
+            return "--"
+    return f"{val*100:+.1f}"
+
 def g(s, *keys):
     for k in keys:
         if k in s: return s[k]
@@ -183,32 +202,13 @@ def cmd_list(all_data):
 def cmd_summary(all_data):
     """Summary tables — split into 4 focused blocks with self-describing headers.
 
-    (1) CLARIFICATION: n, clarif%, ask_user%, n_clarified
-    (2) UTILITY (%) across all 6 conditions (exec × {clean,tool,user} + clarif × same)
-    (3) ATTACK SUCCESS RATE (%) across the 4 attacked conditions
-    (4) DELTAS (pp) — five paired deltas isolating state/channel/combined effects
+    (1) CLARIFICATION: n, ask_user%, n_ask_user
+    (2) UTILITY (%) — all 4 conditions, two denominators (all groups + clarified subset)
+    (3) ATTACK SUCCESS RATE (%) — exec_tool vs clarif_tool, two denominators
+    (4) STATE EFFECT DELTA (pp) — ASR(c4_ask_user_tool) − ASR(c2)
     """
     models = list(all_data.keys())
     model_w = max(22, max(len(m) for m in models) + 2)
-
-    def pct(metric):
-        """Rate (0-1 dict or float) → 'NN.N' string, or '--'."""
-        v = None
-        if isinstance(metric, dict):
-            v = metric.get("rate")
-        elif isinstance(metric, (int, float)):
-            v = metric
-        return f"{v*100:.1f}" if v is not None else "--"
-
-    def pp(val):
-        """Signed pp delta (already in [-1, 1]) → '+NN.N' string, or '--'."""
-        if val is None:
-            return "--"
-        if isinstance(val, dict):
-            val = val.get("rate")
-            if val is None:
-                return "--"
-        return f"{val*100:+.1f}"
 
     def print_table(title, columns, rows, col_widths):
         """
@@ -232,124 +232,119 @@ def cmd_summary(all_data):
             )
 
     # ── Table 1: Clarification ───────────────────────────────────
-    clar_cols = ["n", "clarif%", "ask_user%", "n_clarified"]
-    clar_widths = [6, 10, 12, 14]
+    # Sole signal: did the agent call the ask_user tool in Turn 2?
+    # Under the nudged system prompt this should be ~100%. Low rates
+    # indicate the nudge isn't landing and Phase 2 enforcement is
+    # needed.
+    clar_cols = ["n", "ask_user%", "n_ask", "completed", "enforced", "enf_ok"]
+    clar_widths = [6, 10, 8, 11, 10, 8]
     clar_rows = []
     for name in models:
         s = all_data[name]["summary"]
         clar_rows.append((name, [
             str(s.get("n_groups", "--")),
-            pct(g(s, "clarif_rate")),
             pct(s.get("ask_user_rate")),
-            str(s.get("n_clarified", "--")),
+            str(s.get("n_ask_user", "--")),
+            str(s.get("n_task_completed", "--")),
+            str(s.get("n_enforced", "--")),
+            str(s.get("n_enforced_success", "--")),
         ]))
     print_table("CLARIFICATION", clar_cols, clar_rows, clar_widths)
+    print("  n_ask = called ask_user tool | completed = task done without clarification")
+    print("  enforced = retry triggered   | enf_ok = retry succeeded")
 
-    # ── Table 2a: Utility (%) — ALL GROUPS (n) ───────────────────
-    util_cols = [
-        "exec_clean", "exec_tool", "exec_user",
-        "clarif_clean", "clarif_tool", "clarif_user",
-    ]
-    util_widths = [12, 11, 11, 14, 13, 13]
-    util_keys_all = [
-        ("u_c1",),
-        ("u_c2",),
-        ("u_c2_user",),
-        ("u_c3",),
-        ("u_c4_tool_all",),
-        ("u_c4_user_group_mean", "u_c4"),
-    ]
+    # ── Table 2: Utility (%) — all 4 conditions ──────────────────
+    # Both views share the same 4 columns. The ALL GROUPS view uses
+    # n for every column (c3/c4 skipped → 0). The CLARIFIED ONLY
+    # view uses n_ask_user for every column — apples-to-apples with
+    # C1 and C2 restricted to the same subset.
+    util_cols = ["exec_clean", "exec_tool", "clarif_clean", "clarif_tool"]
+    util_widths = [12, 11, 14, 13]
+
     util_rows_all = []
     for name in models:
         s = all_data[name]["summary"]
-        util_rows_all.append((name, [pct(g(s, *ks)) for ks in util_keys_all]))
+        util_rows_all.append((name, [
+            pct(g(s, "u_c1")),
+            pct(g(s, "u_c2")),
+            pct(s.get("u_c3_all")),
+            pct(s.get("u_c4_ask_user_tool_all")),
+        ]))
     print_table(
-        "UTILITY (%) — ALL GROUPS (n=n_groups; clarif_tool: skipped→u_c3)",
+        "UTILITY (%) — ALL GROUPS (n; c3/c4_ask_user_tool: skipped→0)",
         util_cols, util_rows_all, util_widths,
     )
 
-    # ── Table 2b: Utility (%) — CLARIFIED ONLY (n_clarified) ─────
-    util_keys_cond = [
-        ("u_c1_cond",),
-        ("u_c2_cond",),
-        ("u_c2_user_cond",),
-        ("u_c3_cond",),
-        ("u_c4_tool_cond", "u_c4_tool"),
-        ("u_c4_user_cond",),
-    ]
     util_rows_cond = []
     for name in models:
         s = all_data[name]["summary"]
-        row_label = f"{name}"
-        util_rows_cond.append((row_label, [pct(g(s, *ks)) for ks in util_keys_cond]))
+        util_rows_cond.append((name, [
+            pct(g(s, "u_c1_cond")),
+            pct(g(s, "u_c2_cond")),
+            pct(g(s, "u_c3_cond")),
+            pct(g(s, "u_c4_ask_user_tool_cond")),
+        ]))
     print_table(
-        "UTILITY (%) — CLARIFIED SUBSET ONLY (n_clarified)",
+        "UTILITY (%) — CLARIFIED SUBSET ONLY (n=n_ask_user)",
         util_cols, util_rows_cond, util_widths,
     )
 
-    # ── Table 3a: ASR (%) — ALL GROUPS (n) ───────────────────────
-    asr_cols = ["exec_tool", "exec_user", "clarif_tool", "clarif_user"]
-    asr_widths = [11, 11, 13, 13]
-    asr_keys_all = [
-        ("asr_c2",),
-        ("asr_c2_user",),
-        ("asr_c4_tool_all",),   # skipped → 0 over n
-        ("asr_c4_user_group_any", "c4_any_attack_success", "asr_c4"),
-    ]
+    # ── Table 3: ASR (%) — exec_tool vs clarif_tool ──────────────
+    asr_cols = ["exec_tool", "clarif_tool"]
+    asr_widths = [12, 14]
+
     asr_rows_all = []
     for name in models:
         s = all_data[name]["summary"]
-        asr_rows_all.append((name, [pct(g(s, *ks)) for ks in asr_keys_all]))
+        asr_rows_all.append((name, [
+            pct(g(s, "asr_c2")),
+            pct(g(s, "asr_c4_ask_user_tool_all")),
+        ]))
     print_table(
-        "ATTACK SUCCESS RATE (%) — ALL GROUPS (n=n_groups; clarif_*: skipped→ASR=0)",
+        "ATTACK SUCCESS RATE (%) — ALL GROUPS (n; clarif_tool: skipped→0)",
         asr_cols, asr_rows_all, asr_widths,
     )
 
-    # ── Table 3b: ASR (%) — CLARIFIED ONLY (n_clarified) ─────────
-    asr_keys_cond = [
-        ("asr_c2_cond",),
-        ("asr_c2_user_cond",),
-        ("asr_c4_tool_cond", "asr_c4_tool"),  # both point to the n_c4_tool_run version
-        ("asr_c4_user_cond",),
-    ]
     asr_rows_cond = []
     for name in models:
         s = all_data[name]["summary"]
-        row_label = f"{name}"
-        asr_rows_cond.append((row_label, [pct(g(s, *ks)) for ks in asr_keys_cond]))
+        asr_rows_cond.append((name, [
+            pct(g(s, "asr_c2_cond")),
+            pct(g(s, "asr_c4_ask_user_tool_cond")),
+        ]))
     print_table(
-        "ATTACK SUCCESS RATE (%) — CLARIFIED SUBSET ONLY (same n_clarified)",
+        "ATTACK SUCCESS RATE (%) — CLARIFIED SUBSET ONLY (n=n_ask_user)",
         asr_cols, asr_rows_cond, asr_widths,
     )
 
-    # ── Table 4: Deltas (pp) ─────────────────────────────────────
-    delta_cols = [
-        "state_tool",       # dasr_state:       clarif_tool - exec_tool
-        "state_user",       # dasr_state_user:  clarif_user - exec_user
-        "channel_clarif",   # dasr_channel:     clarif_user - clarif_tool
-        "channel_exec",     # dasr_channel_exec exec_user - exec_tool
-        "combined",         # dasr_combined:    clarif_user - exec_tool
-    ]
-    delta_widths = [12, 12, 16, 14, 10]
-    delta_keys = [
-        ("dasr_state", "delta_asr_any"),
-        ("dasr_state_user",),
-        ("dasr_channel",),
-        ("dasr_channel_exec",),
-        ("dasr_combined", "delta_asr_any"),
-    ]
+    # ── Table 4: State effect delta ──────────────────────────────
+    # The single headline delta: ASR(c4_ask_user_tool) − ASR(c2).
+    # Channel is held constant at tool-output (both injections arrive
+    # as role: tool messages with the same ImportantInstructionsAttack
+    # wrapper text). Only state varies (execution → clarification after
+    # ask_user call). Positive = clarification state is more vulnerable.
+    delta_cols = ["state_Δ (all)", "state_Δ (cond)"]
+    delta_widths = [16, 16]
     delta_rows = []
     for name in models:
         s = all_data[name]["summary"]
-        delta_rows.append((name, [pp(g(s, *ks)) for ks in delta_keys]))
-    print_table("DELTAS (pp, clarif − exec)", delta_cols, delta_rows, delta_widths)
+        delta_rows.append((name, [
+            pp(s.get("dasr_state")),
+            pp(s.get("dasr_state_cond")),
+        ]))
+    print_table(
+        "STATE EFFECT DELTA (pp) — ASR(clarif_tool) − ASR(exec_tool)",
+        delta_cols, delta_rows, delta_widths,
+    )
 
-    print("\nDelta definitions:")
-    print("  state_tool      = ASR(clarif_tool) − ASR(exec_tool)     # state effect, tool channel")
-    print("  state_user      = ASR(clarif_user) − ASR(exec_user)     # state effect, user channel")
-    print("  channel_clarif  = ASR(clarif_user) − ASR(clarif_tool)   # channel effect, in clarification")
-    print("  channel_exec    = ASR(exec_user)   − ASR(exec_tool)     # channel effect, in execution")
-    print("  combined        = ASR(clarif_user) − ASR(exec_tool)     # combined state + channel")
+    print("\nDelta definition:")
+    print("  state_Δ = ASR(c4_ask_user_tool) − ASR(c2)")
+    print("            # both inject the same")
+    print("            # ImportantInstructionsAttack wrapper in a role:tool")
+    print("            # message. Only the state differs (execution vs clarif).")
+    print("  (all)  = mean over all n groups; clarif_tool scored 0 if agent")
+    print("           didn't call ask_user in Turn 2.")
+    print("  (cond) = mean over n_ask_user.")
 
 
 def cmd_detail(all_data, model_name):
@@ -359,68 +354,88 @@ def cmd_detail(all_data, model_name):
     s = all_data[model_name]["summary"]
 
     print(f"\n{'='*60}")
-    print(f"{model_name}  (n={s['n_groups']} groups)")
+    print(f"{model_name}  (n={s['n_groups']}, n_ask_user={s.get('n_ask_user', '?')})")
     print(f"{'='*60}")
 
-    print(f"\n  Utility (all 6 conditions):   {'Rate':>25}")
-    for label, key in [
-        ("exec_benign",         "u_c1"),
-        ("exec_tool_attack",    "u_c2"),
-        ("exec_user_attack",    "u_c2_user"),
-        ("clarif_benign",       "u_c3"),
-        ("clarif_tool_attack",  "u_c4_tool"),
-    ]:
-        print(f"  {label:<24} {ci(g(s,key)):>25}")
-    print(f"  {'clarif_user_attack':<24} {r(g(s,'u_c4_user_group_mean','u_c4')):>25}")
-
-    print(f"\n  ASR (4 attacked conditions):")
-    print(f"  {'exec_tool_attack':<24} {ci(g(s,'asr_c2')):>25}")
-    print(f"  {'exec_user_attack':<24} {ci(g(s,'asr_c2_user')):>25}")
-    print(f"  {'clarif_tool_attack':<24} {ci(g(s,'asr_c4_tool')):>25}")
-    print(f"  {'clarif_user_attack':<24} {ci(g(s,'asr_c4_user_group_any','c4_any_attack_success')):>25}")
-    print(f"  {'clarif_rate':<24} {ci(g(s,'clarif_rate')):>25}")
-
-    print(f"\n  DASR:                          {'All':>10} {'Clarified':>10}")
-    print(f"  {'Dst  (CTA-ETA)':<28} {r(g(s,'dasr_state','delta_asr_any')):>10} {r(g(s,'dasr_state_cond','delta_asr_any_cond')):>10}")
-    print(f"  {'DstU (CUA-EUA)':<28} {r(g(s,'dasr_state_user')):>10} {r(g(s,'dasr_state_user_cond')):>10}")
-    print(f"  {'Dch  (CUA-CTA)':<28} {r(g(s,'dasr_channel')):>10} {r(g(s,'dasr_channel_cond')):>10}")
-    print(f"  {'DchE (EUA-ETA)':<28} {r(g(s,'dasr_channel_exec')):>10} {'--':>10}")
-    print(f"  {'Dcb  (CUA-ETA)':<28} {r(g(s,'dasr_combined','delta_asr_any')):>10} {r(g(s,'dasr_combined_cond','delta_asr_any_cond')):>10}")
-
-    print(f"\n  Utility deltas:")
-    print(f"  {'CB - EB':<24} {r(g(s,'delta_u_clarif')):>10}")
-    print(f"  {'ETA - EB':<24} {r(g(s,'delta_u_inject_c2')):>10}")
-    print(f"  {'CUA - CB':<24} {r(g(s,'delta_u_inject_c4_user','delta_u_inject_c4')):>10}")
-    print(f"  {'CTA - CB':<24} {r(g(s,'delta_u_inject_c4_tool')):>10}")
-
-    if s.get("by_operator"):
-        print(f"\n  Per operator (clarif_user_attack):")
-        for op, m in sorted(s["by_operator"].items()):
-            asr = m.get("asr_c4_user", m.get("asr_c4", {}))
-            d = m.get("dasr_combined", m.get("delta_asr", 0))
-            print(f"    {op:<5} ASR={ci(asr):<25} DASR={d:+.4f}")
-
-    # ask_user decomposition of clarif_rate
+    print(f"\n  Clarification:")
     if s.get("ask_user_rate") is not None:
-        print(f"\n  {'ask_user_rate (tool only)':<24} {s['ask_user_rate']:>9.1%}")
+        print(f"  {'ask_user_rate':<28} {s['ask_user_rate']*100:>23.1f}%")
+
+    print(f"\n  Utility — ALL GROUPS (n={s['n_groups']}):")
+    print(f"  {'exec_clean (c1)':<28} {ci(g(s,'u_c1')):>25}")
+    print(f"  {'exec_tool (c2)':<28} {ci(g(s,'u_c2')):>25}")
+    u3a = s.get("u_c3_all")
+    u4a = s.get("u_c4_ask_user_tool_all")
+    print(f"  {'clarif_clean (c3)':<28} {(f'{u3a*100:.1f}%' if u3a is not None else '--'):>25}")
+    print(f"  {'clarif_tool (c4_aut)':<28} {(f'{u4a*100:.1f}%' if u4a is not None else '--'):>25}")
+
+    print(f"\n  Utility — CLARIFIED SUBSET (n={s.get('n_ask_user','?')}:")
+    print(f"  {'exec_clean (c1)':<28} {ci(g(s,'u_c1_cond')):>25}")
+    print(f"  {'exec_tool (c2)':<28} {ci(g(s,'u_c2_cond')):>25}")
+    print(f"  {'clarif_clean (c3)':<28} {ci(g(s,'u_c3_cond')):>25}")
+    print(f"  {'clarif_tool (c4_aut)':<28} {ci(g(s,'u_c4_ask_user_tool_cond')):>25}")
+
+    print(f"\n  ASR — ALL GROUPS (n={s['n_groups']}):")
+    print(f"  {'exec_tool (c2)':<28} {ci(g(s,'asr_c2')):>25}")
+    print(f"  {'clarif_tool (c4_aut)':<28} {ci(g(s,'asr_c4_ask_user_tool_all')):>25}")
+
+    print(f"\n  ASR — CLARIFIED SUBSET (n={s.get('n_ask_user','?')}):")
+    print(f"  {'exec_tool (c2)':<28} {ci(g(s,'asr_c2_cond')):>25}")
+    print(f"  {'clarif_tool (c4_aut)':<28} {ci(g(s,'asr_c4_ask_user_tool_cond')):>25}")
+
+    print(f"\n  State effect delta (ASR(c4_aut) − ASR(c2)):")
+    ds_all = s.get("dasr_state")
+    ds_cond = s.get("dasr_state_cond")
+    print(f"  {'over all n groups':<28} {(f'{ds_all*100:+.1f}pp' if ds_all is not None else '--'):>25}")
+    print(f"  {'over n_ask_user (cond)':<28} {(f'{ds_cond*100:+.1f}pp' if ds_cond is not None else '--'):>25}")
+
+    print(f"\n  Utility deltas (on n_ask_user):")
+    print(f"  {'u(c3) − u(c1)':<28} {pp(s.get('delta_u_clarif_cond')):>25}")
+    print(f"  {'u(c2) − u(c1)':<28} {pp(s.get('delta_u_inject_c2_cond')):>25}")
+    print(f"  {'u(c4_aut) − u(c3)':<28} {pp(s.get('delta_u_inject_c4_cond')):>25}")
 
 
 def cmd_trace(all_data):
-    """Trace metrics: all 4 attacked conditions for attack, all 6 for utility."""
+    """Trace metrics: rule-based attempted vs env-state succeeded.
+
+    4 conditions: c1, c2, c3, c4_ask_user_tool.
+    """
     models = list(all_data.keys())
     for name in models:
         s = all_data[name]["summary"]
         print(f"\n{name}:")
-        # Attack row: 4 attacked conditions
-        print(f"  Attack:       {'ETA':>10} {'EUA':>10} {'CTA':>10} {'CUA':>10}")
-        print(f"  Attempted     {r(s.get('trace_attack_attempted_c2')):>10} {r(s.get('trace_attack_attempted_c2_user')):>10} {r(s.get('trace_attack_attempted_c4_tool')):>10} {r(s.get('trace_attack_attempted_c4_user_any')):>10}")
-        print(f"  Succeeded     {r(g(s,'asr_c2')):>10} {r(g(s,'asr_c2_user')):>10} {r(g(s,'asr_c4_tool')):>10} {r(g(s,'asr_c4_user_group_any','c4_any_attack_success','asr_c4')):>10}")
-        # Utility row: all 6 conditions
-        print(f"  Utility:      {'EB':>10} {'ETA':>10} {'EUA':>10} {'CB':>10} {'CTA':>10} {'CUA':>10}")
-        print(f"  Attempted     {r(s.get('trace_utility_attempted_c1')):>10} {r(s.get('trace_utility_attempted_c2')):>10} {r(s.get('trace_utility_attempted_c2_user')):>10} {r(s.get('trace_utility_attempted_c3')):>10} {r(s.get('trace_utility_attempted_c4_tool')):>10} {r(s.get('trace_utility_attempted_c4_user_mean')):>10}")
-        print(f"  Succeeded     {r(g(s,'u_c1')):>10} {r(g(s,'u_c2')):>10} {r(g(s,'u_c2_user')):>10} {r(g(s,'u_c3')):>10} {r(g(s,'u_c4_tool')):>10} {r(g(s,'u_c4_user_group_mean','u_c4')):>10}")
-    print(f"\n  EB=exec_benign  ETA=exec_tool_attack  EUA=exec_user_attack")
-    print(f"  CB=clarif_benign  CTA=clarif_tool_attack  CUA=clarif_user_attack")
+        # Attack row: 2 attacked conditions
+        print(f"  Attack:       {'exec_tool':>14} {'clarif_tool':>14}")
+        print(
+            f"  Attempted     "
+            f"{r(s.get('trace_attack_attempted_c2')):>14} "
+            f"{r(s.get('trace_attack_attempted_c4_ask_user_tool')):>14}"
+        )
+        print(
+            f"  Succeeded     "
+            f"{r(g(s,'asr_c2')):>14} "
+            f"{r(g(s,'asr_c4_ask_user_tool_cond','asr_c4_ask_user_tool_all')):>14}"
+        )
+        # Utility row: all 4 conditions
+        print(
+            f"  Utility:      "
+            f"{'exec_clean':>14} {'exec_tool':>14} "
+            f"{'clarif_clean':>14} {'clarif_tool':>14}"
+        )
+        print(
+            f"  Attempted     "
+            f"{r(s.get('trace_utility_attempted_c1')):>14} "
+            f"{r(s.get('trace_utility_attempted_c2')):>14} "
+            f"{r(s.get('trace_utility_attempted_c3')):>14} "
+            f"{r(s.get('trace_utility_attempted_c4_ask_user_tool')):>14}"
+        )
+        print(
+            f"  Succeeded     "
+            f"{r(g(s,'u_c1')):>14} "
+            f"{r(g(s,'u_c2')):>14} "
+            f"{r(g(s,'u_c3_cond')):>14} "
+            f"{r(g(s,'u_c4_ask_user_tool_cond')):>14}"
+        )
 
 
 # ---------------------------------------------------------------------------
