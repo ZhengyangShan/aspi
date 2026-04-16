@@ -28,7 +28,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from aspi.common.paths import EVAL_RESULTS_DIR, JUDGED_RESULTS_DIR, PLOTS_DIR
-from aspi.common.variants import get_c4_user_variants
 from aspi.eval.metrics import (
     aggregate,
     attack_attempted_rule,
@@ -92,12 +91,10 @@ DEFAULT_RESULTS: dict[str, Path] = {}
 # ---------------------------------------------------------------------------
 
 COLORS = {
-    "C1": "#27ae60",       # exec_benign — green (safe baseline)
-    "C2": "#e67e22",       # exec_tool_attack — orange
-    "C2_user": "#f0b27a",  # exec_user_attack — light orange (control)
-    "C3": "#2e86c1",       # clarif_benign — blue (safe baseline)
-    "C4_tool": "#cb4335",  # clarif_tool_attack — red
-    "C4_user": "#ec7063",  # clarif_user_attack — light red
+    "C1": "#27ae60",              # exec_clean — green
+    "C2": "#e67e22",              # exec_tool — orange
+    "C3": "#2e86c1",              # clarif_clean — blue
+    "C4_ask_user_tool": "#cb4335",  # clarif_tool — red
 }
 MODEL_MARKERS = ["o", "s", "D", "^", "v", "P", "*", "X"]
 
@@ -161,10 +158,6 @@ def _any_judge(all_data):
     """True if at least one model has judge annotations."""
     return any(d.get("has_judge") for d in all_data.values())
 
-# Local alias for the shared helper. Single source of truth lives in
-# aspi.common.variants; kept here under its short historical name so
-# the existing call sites don't need touching.
-_get_c4v = get_c4_user_variants
 
 
 def load_results(result_files: dict) -> dict:
@@ -256,8 +249,8 @@ def cmd_summary(all_data):
     # ── Table 2: Utility (%) — all 4 conditions ──────────────────
     # Both views share the same 4 columns. The ALL GROUPS view uses
     # n for every column (c3/c4 skipped → 0). The CLARIFIED ONLY
-    # view uses n_ask_user for every column — apples-to-apples with
-    # C1 and C2 restricted to the same subset.
+    # view uses n_ask_user for every column — C1 and C2 restricted
+    # to the same clarified subset.
     util_cols = ["exec_clean", "exec_tool", "clarif_clean", "clarif_tool"]
     util_widths = [12, 11, 14, 13]
 
@@ -339,12 +332,12 @@ def cmd_summary(all_data):
 
     print("\nDelta definition:")
     print("  state_Δ = ASR(c4_ask_user_tool) − ASR(c2)")
-    print("            # both inject the same")
+    print("            # Both inject the same")
     print("            # ImportantInstructionsAttack wrapper in a role:tool")
     print("            # message. Only the state differs (execution vs clarif).")
     print("  (all)  = mean over all n groups; clarif_tool scored 0 if agent")
     print("           didn't call ask_user in Turn 2.")
-    print("  (cond) = mean over n_ask_user.")
+    print("  (cond) = mean over n_ask_user (clarified subset).")
 
 
 def cmd_detail(all_data, model_name):
@@ -369,7 +362,7 @@ def cmd_detail(all_data, model_name):
     print(f"  {'clarif_clean (c3)':<28} {(f'{u3a*100:.1f}%' if u3a is not None else '--'):>25}")
     print(f"  {'clarif_tool (c4_aut)':<28} {(f'{u4a*100:.1f}%' if u4a is not None else '--'):>25}")
 
-    print(f"\n  Utility — CLARIFIED SUBSET (n={s.get('n_ask_user','?')}:")
+    print(f"\n  Utility — CLARIFIED SUBSET (n={s.get('n_ask_user','?')}):")
     print(f"  {'exec_clean (c1)':<28} {ci(g(s,'u_c1_cond')):>25}")
     print(f"  {'exec_tool (c2)':<28} {ci(g(s,'u_c2_cond')):>25}")
     print(f"  {'clarif_clean (c3)':<28} {ci(g(s,'u_c3_cond')):>25}")
@@ -443,26 +436,24 @@ def cmd_trace(all_data):
 # ---------------------------------------------------------------------------
 
 def plot_utility_vs_asr(all_data, save_dir):
-    """Plot 1: Scatter — baseline utility u(C1) vs ASR for all 4 attacked conditions."""
+    """Plot 1: Scatter — baseline utility u(C1) vs ASR for 2 attacked conditions."""
     models = list(all_data.keys())
     fig, ax = plt.subplots(figsize=(9, 6))
 
-    # All 4 attacked conditions: (label, key_primary, key_fallback, color)
+    # 2 attacked conditions: C2 (exec_tool) and C4_ask_user_tool (clarif_tool)
     conds = [
-        ("C2_tool",  "asr_c2",       None,                              COLORS["C2"]),
-        ("C2_user",  "asr_c2_user",  None,                              COLORS["C2_user"]),
-        ("C4_tool",  "asr_c4_tool",  None,                              COLORS["C4_tool"]),
-        ("C4_user",  "asr_c4_user_group_any", "c4_any_attack_success",  COLORS["C4_user"]),
+        ("C2",              "asr_c2_cond",              COLORS["C2"]),
+        ("C4_ask_user_tool", "asr_c4_ask_user_tool_cond", COLORS["C4_ask_user_tool"]),
     ]
 
     for i, m in enumerate(models):
         s = all_data[m]["summary"]
-        x = _val(g(s, "u_c1"))
+        x = _val(g(s, "u_c1_cond"))
         mk = MODEL_MARKERS[i % len(MODEL_MARKERS)]
 
         y_vals = []
-        for label, key, fb, color in conds:
-            y = _val(g(s, key, fb)) if fb else _val(g(s, key))
+        for label, key, color in conds:
+            y = _val(g(s, key))
             ax.scatter(x, y, marker=mk, s=90, color=color, zorder=5,
                        edgecolor="black", linewidth=0.5)
             y_vals.append(y)
@@ -475,7 +466,7 @@ def plot_utility_vs_asr(all_data, save_dir):
                markerfacecolor=color, markersize=9,
                markeredgecolor="black", markeredgewidth=0.5,
                label=f"ASR({label})")
-        for label, _, _, color in conds
+        for label, _, color in conds
     ]
     for i, m in enumerate(models):
         legend_els.append(Line2D([0], [0], marker=MODEL_MARKERS[i % len(MODEL_MARKERS)],
@@ -483,7 +474,7 @@ def plot_utility_vs_asr(all_data, save_dir):
     ax.legend(handles=legend_els, fontsize=8, loc="best")
     ax.set_xlabel("Utility u(C1) — benign baseline", fontsize=11)
     ax.set_ylabel("Attack Success Rate", fontsize=11)
-    ax.set_title("Utility vs ASR — all 4 attacked conditions", fontsize=12)
+    ax.set_title("Utility vs ASR — 2 attacked conditions", fontsize=12)
     ax.set_xlim(-0.05, 1.05); ax.set_ylim(-0.05, 1.05)
     ax.grid(alpha=0.3)
     plt.tight_layout()
@@ -493,37 +484,27 @@ def plot_utility_vs_asr(all_data, save_dir):
 
 
 def plot_utility_degradation(all_data, save_dir):
-    """Plot 2: Scatter — u(C1) baseline vs u(attacked) for all 4 attacked conditions."""
+    """Plot 2: Scatter — u(C1) baseline vs u(C2/C3/C4) for 4 conditions."""
     models = list(all_data.keys())
     fig, ax = plt.subplots(figsize=(9, 6))
 
     ax.plot([0, 1], [0, 1], "k--", alpha=0.3)
 
-    has_c4t = any(
-        (g(all_data[m]["summary"], "u_c4_tool") or {}).get("rate") is not None
-        for m in models
-    )
-    has_c2u = any(
-        (g(all_data[m]["summary"], "u_c2_user") or {}).get("rate") is not None
-        for m in models
-    )
-
-    # All 4 attacked conditions: (label, key_primary, key_fallback, color)
-    conds = [("C2_tool", "u_c2", None, COLORS["C2"])]
-    if has_c2u:
-        conds.append(("C2_user", "u_c2_user", None, COLORS["C2_user"]))
-    if has_c4t:
-        conds.append(("C4_tool", "u_c4_tool", None, COLORS["C4_tool"]))
-    conds.append(("C4_user", "u_c4_user_group_mean", "u_c4", COLORS["C4_user"]))
+    # 3 conditions plotted on y against C1 on x
+    conds = [
+        ("C2",              "u_c2_cond",              COLORS["C2"]),
+        ("C3",              "u_c3_cond",              COLORS.get("C3", "#2ecc71")),
+        ("C4_ask_user_tool", "u_c4_ask_user_tool_cond", COLORS["C4_ask_user_tool"]),
+    ]
 
     for i, m in enumerate(models):
         s = all_data[m]["summary"]
-        x = _val(g(s, "u_c1"))
+        x = _val(g(s, "u_c1_cond"))
         mk = MODEL_MARKERS[i % len(MODEL_MARKERS)]
 
         y_vals = []
-        for label, key, fb, color in conds:
-            y = _val(g(s, key, fb)) if fb else _val(g(s, key))
+        for label, key, color in conds:
+            y = _val(g(s, key))
             ax.scatter(x, y, marker=mk, s=90, color=color, zorder=5,
                        edgecolor="black", linewidth=0.5)
             y_vals.append(y)
@@ -531,7 +512,7 @@ def plot_utility_degradation(all_data, save_dir):
 
     from matplotlib.lines import Line2D
     legend_els = [Line2D([0], [0], linestyle="--", color="k", alpha=0.3, label="No degradation")]
-    for label, _, _, color in conds:
+    for label, _, color in conds:
         legend_els.append(Line2D([0], [0], marker="o", color="w",
                                  markerfacecolor=color, markersize=9,
                                  markeredgecolor="black", markeredgewidth=0.5,
@@ -541,8 +522,8 @@ def plot_utility_degradation(all_data, save_dir):
                                  color="w", markerfacecolor="gray", markersize=8, label=m))
     ax.legend(handles=legend_els, fontsize=8, loc="best")
     ax.set_xlabel("u(C1) — utility without attack", fontsize=11)
-    ax.set_ylabel("Utility under attack", fontsize=11)
-    ax.set_title("Utility Degradation — all 4 attacked conditions", fontsize=12)
+    ax.set_ylabel("Utility under condition", fontsize=11)
+    ax.set_title("Utility Degradation — C1 baseline vs C2/C3/C4", fontsize=12)
     ax.set_xlim(-0.05, 1.05); ax.set_ylim(-0.05, 1.05)
     ax.grid(alpha=0.3)
     plt.tight_layout()
@@ -552,38 +533,20 @@ def plot_utility_degradation(all_data, save_dir):
 
 
 def plot_asr_by_condition(all_data, save_dir):
-    """Plot 3: Grouped bar — ASR per condition with CI error bars."""
+    """Plot 3: Grouped bar — ASR for 2 conditions (C2, C4_ask_user_tool) with CI."""
     models = list(all_data.keys())
 
-    # Auto-detect C4_tool
-    has_c4t = any(
-        _val(g(all_data[m]["summary"], "asr_c4_tool")) > 0
-        or (g(all_data[m]["summary"], "asr_c4_tool") or {}).get("rate") is not None
-        for m in models
-    )
-    # Auto-detect C2_user
-    has_c2u = any(
-        (g(all_data[m]["summary"], "asr_c2_user") or {}).get("rate") is not None
-        for m in models
-    )
-
-    conds = [("C2", "asr_c2", COLORS["C2"])]
-    if has_c2u:
-        conds.append(("C2_user", "asr_c2_user", COLORS["C2_user"]))
-    if has_c4t:
-        conds.append(("C4_tool", "asr_c4_tool", COLORS["C4_tool"]))
-    conds.append(("C4_user", None, COLORS["C4_user"]))  # special key handling
+    conds = [
+        ("C2 (exec_tool)",              "asr_c2_cond",              COLORS["C2"]),
+        ("C4_ask_user_tool (clarif_tool)", "asr_c4_ask_user_tool_cond", COLORS["C4_ask_user_tool"]),
+    ]
 
     fig, ax = plt.subplots(figsize=(10, 5))
     x = np.arange(len(models))
     w = 0.8 / len(conds)
 
     for j, (label, key, color) in enumerate(conds):
-        if key:
-            metrics = [g(all_data[m]["summary"], key) or {} for m in models]
-        else:
-            metrics = [g(all_data[m]["summary"], "asr_c4_user_group_any", "c4_any_attack_success", "asr_c4") or {} for m in models]
-
+        metrics = [g(all_data[m]["summary"], key) or {} for m in models]
         vals = [_val(met) for met in metrics]
         errs = [_ci_err(met) for met in metrics]
         yerr = np.array([e if e else [0, 0] for e in errs]).T
@@ -608,52 +571,28 @@ def plot_asr_by_condition(all_data, save_dir):
 
 
 def plot_utility_by_condition(all_data, save_dir):
-    """Plot: Grouped bar — utility per condition (all 6) with CI error bars."""
+    """Plot: Grouped bar — utility per condition (4 conditions) with CI error bars."""
     models = list(all_data.keys())
 
-    # All 6 conditions: (label, key, color)
+    # 4 conditions: C1, C2, C3, C4_ask_user_tool (clarified subset)
     conds = [
-        ("C1",      "u_c1",      COLORS["C1"]),
-        ("C2_tool", "u_c2",      COLORS["C2"]),
-        ("C2_user", "u_c2_user", COLORS["C2_user"]),
-        ("C3",      "u_c3",      COLORS["C3"]),
-        ("C4_tool", "u_c4_tool", COLORS["C4_tool"]),
+        ("C1",              "u_c1_cond",              COLORS["C1"]),
+        ("C2",              "u_c2_cond",              COLORS["C2"]),
+        ("C3",              "u_c3_cond",              COLORS.get("C3", "#2ecc71")),
+        ("C4_ask_user_tool", "u_c4_ask_user_tool_cond", COLORS["C4_ask_user_tool"]),
     ]
-    # C4_user uses group-mean, which may be a plain float or a dict
-    conds.append(("C4_user", None, COLORS["C4_user"]))
-
-    # Filter to conditions that have data
-    active_conds = []
-    for label, key, color in conds:
-        if key is None:
-            # C4_user always included
-            active_conds.append((label, key, color))
-            continue
-        has_data = any(
-            (g(all_data[m]["summary"], key) or {}).get("rate") is not None
-            for m in models
-        )
-        if has_data:
-            active_conds.append((label, key, color))
 
     fig, ax = plt.subplots(figsize=(11, 5))
     x = np.arange(len(models))
-    w = 0.8 / max(len(active_conds), 1)
+    w = 0.8 / len(conds)
 
-    for j, (label, key, color) in enumerate(active_conds):
-        if key:
-            metrics = [g(all_data[m]["summary"], key) or {} for m in models]
-        else:
-            metrics = [
-                g(all_data[m]["summary"], "u_c4_user_group_mean", "u_c4") or {}
-                for m in models
-            ]
-
+    for j, (label, key, color) in enumerate(conds):
+        metrics = [g(all_data[m]["summary"], key) or {} for m in models]
         vals = [_val(met) for met in metrics]
         errs = [_ci_err(met) for met in metrics]
         yerr = np.array([e if e else [0, 0] for e in errs]).T
 
-        offset = (j - (len(active_conds) - 1) / 2) * w
+        offset = (j - (len(conds) - 1) / 2) * w
         bars = ax.bar(x + offset, vals, w, label=label, color=color,
                       yerr=yerr, capsize=3, error_kw={"linewidth": 1})
         for bar in bars:
@@ -663,7 +602,7 @@ def plot_utility_by_condition(all_data, save_dir):
                         f"{h:.0%}", ha="center", fontsize=7)
 
     ax.set_ylabel("Utility", fontsize=11)
-    ax.set_title("Utility by Condition — all 6 conditions", fontsize=12)
+    ax.set_title("Utility by Condition — 4 conditions", fontsize=12)
     ax.set_xticks(x); ax.set_xticklabels(models, rotation=15, ha="right")
     ax.legend(fontsize=8, loc="best"); ax.set_ylim(0, 1.15)
     plt.tight_layout()
@@ -673,34 +612,28 @@ def plot_utility_by_condition(all_data, save_dir):
 
 
 def plot_dasr(all_data, save_dir):
-    """Plot 4: DASR decomposition — state/channel/combined (tool + user channels)."""
+    """Plot 4: State effect delta — single bar per model showing dasr_state_cond."""
     models = list(all_data.keys())
-    fig, ax = plt.subplots(figsize=(12, 5))
-    bars_spec = [
-        ("state (C4t-C2)", "dasr_state", "delta_asr_any", "#9b59b6"),
-        ("state_user (C4u-C2u)", "dasr_state_user", None, "#e67e22"),
-        ("channel (C4u-C4t)", "dasr_channel", None, "#3498db"),
-        ("channel_exec (C2u-C2)", "dasr_channel_exec", None, "#8e44ad"),
-        ("combined (C4u-C2)", "dasr_combined", "delta_asr_any", "#e74c3c"),
-    ]
-    x = np.arange(len(models)); w = 0.15
-    center = (len(bars_spec) - 1) / 2.0
+    fig, ax = plt.subplots(figsize=(10, 5))
 
-    for j, (lbl, key, fb, col) in enumerate(bars_spec):
-        vals = [all_data[m]["summary"].get(key, all_data[m]["summary"].get(fb, 0) if fb else 0) or 0
-                for m in models]
-        b = ax.bar(x + (j - center) * w, vals, w, label=lbl, color=col)
-        for bar in b:
-            h = bar.get_height()
-            if abs(h) > 0.001:
-                ax.text(bar.get_x() + bar.get_width() / 2,
-                        h + (0.02 if h >= 0 else -0.02),
-                        f"{h:+.2f}", ha="center",
-                        va="bottom" if h >= 0 else "top", fontsize=7)
+    x = np.arange(len(models))
+    vals = [all_data[m]["summary"].get("dasr_state_cond") or 0 for m in models]
+    color = "#9b59b6"
+
+    bars = ax.bar(x, vals, 0.5, color=color, label="state delta (cond)")
+    for bar in bars:
+        h = bar.get_height()
+        if abs(h) > 0.001:
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    h + (0.02 if h >= 0 else -0.02),
+                    f"{h:+.2f}", ha="center",
+                    va="bottom" if h >= 0 else "top", fontsize=8)
+
     ax.axhline(y=0, color="black", linewidth=1)
-    ax.set_ylabel("DASR"); ax.set_title("DASR Decomposition")
+    ax.set_ylabel("DASR (pp)")
+    ax.set_title("State Effect Delta — ASR(C4_ask_user_tool) - ASR(C2), clarified subset")
     ax.set_xticks(x); ax.set_xticklabels(models, rotation=15, ha="right")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=9)
     plt.tight_layout()
     out = save_dir / "aspi_dasr_decomposition.png"
     plt.savefig(out, dpi=150, bbox_inches="tight"); plt.close()
@@ -708,7 +641,7 @@ def plot_dasr(all_data, save_dir):
 
 
 def plot_asr_by_suite(all_data, save_dir):
-    """Plot 5: Per-suite ASR — all 4 attacked conditions, faceted by model."""
+    """Plot 5: Per-suite ASR — 2 conditions (C2, C4_ask_user_tool), faceted by model."""
     models = list(all_data.keys())
     all_suites = sorted(set(
         s for m in models
@@ -717,24 +650,10 @@ def plot_asr_by_suite(all_data, save_dir):
     if not all_suites:
         print("No suite data"); return
 
-    # Auto-detect which conditions have data
-    def _suite_has(key):
-        return any(
-            _val(all_data[m]["summary"].get("by_suite", {}).get(s, {}).get(key)) > 0
-            or (all_data[m]["summary"].get("by_suite", {}).get(s, {}).get(key) or {}).get("rate") is not None
-            for m in models for s in all_suites
-        )
-
-    has_c2u = _suite_has("asr_c2_user")
-    has_c4t = _suite_has("asr_c4_tool")
-
-    # Build condition list — all 4 attacked conditions when available
-    cond_specs = [("C2_tool", "asr_c2", COLORS["C2"])]
-    if has_c2u:
-        cond_specs.append(("C2_user", "asr_c2_user", COLORS["C2_user"]))
-    if has_c4t:
-        cond_specs.append(("C4_tool", "asr_c4_tool", COLORS["C4_tool"]))
-    cond_specs.append(("C4_user", "asr_c4_user", COLORS["C4_user"]))
+    cond_specs = [
+        ("C2",              "asr_c2_cond",              COLORS["C2"]),
+        ("C4_ask_user_tool", "asr_c4_ask_user_tool_cond", COLORS["C4_ask_user_tool"]),
+    ]
 
     n_conds = len(cond_specs)
     bar_w = 0.8 / n_conds
@@ -749,13 +668,7 @@ def plot_asr_by_suite(all_data, save_dir):
         x = np.arange(len(all_suites))
 
         for j, (label, key, color) in enumerate(cond_specs):
-            # C4_user fallback: older results used "asr_c4"
-            if key == "asr_c4_user":
-                vals = [_val(by_suite.get(s, {}).get("asr_c4_user",
-                                                     by_suite.get(s, {}).get("asr_c4")))
-                        for s in all_suites]
-            else:
-                vals = [_val(by_suite.get(s, {}).get(key)) for s in all_suites]
+            vals = [_val(by_suite.get(s, {}).get(key)) for s in all_suites]
             offset = (j - (n_conds - 1) / 2) * bar_w
             bars = ax.bar(x + offset, vals, bar_w, label=label, color=color)
             for bar in bars:
@@ -770,7 +683,7 @@ def plot_asr_by_suite(all_data, save_dir):
             ax.set_ylabel("ASR")
             ax.legend(fontsize=8)
 
-    fig.suptitle("ASR by Task Suite — all attacked conditions", fontsize=13, y=1.02)
+    fig.suptitle("ASR by Task Suite — C2 and C4_ask_user_tool", fontsize=13, y=1.02)
     plt.tight_layout()
     out = save_dir / "aspi_asr_by_suite.png"
     plt.savefig(out, dpi=150, bbox_inches="tight"); plt.close()
@@ -778,72 +691,26 @@ def plot_asr_by_suite(all_data, save_dir):
 
 
 def plot_operators(all_data, save_dir):
-    """Plot 6: Per-operator ASR."""
-    models = list(all_data.keys())
-    all_ops = sorted(set(
-        op for m in models
-        for op in all_data[m]["summary"].get("by_operator", {}).keys()
-    ))
-    if not all_ops:
-        print("No operator data"); return
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    x = np.arange(len(models)); w = 0.8 / max(len(all_ops), 1)
-    cols = ["#e74c3c", "#3498db", "#2ecc71", "#9b59b6"]
-    for j, op in enumerate(all_ops):
-        vals = [_val(all_data[m]["summary"].get("by_operator", {}).get(op, {}).get(
-            "asr_c4_user", all_data[m]["summary"].get("by_operator", {}).get(op, {}).get("asr_c4")))
-            for m in models]
-        bars = ax.bar(x + (j - (len(all_ops) - 1) / 2) * w, vals, w,
-                      label=op, color=cols[j % len(cols)])
-        for bar in bars:
-            h = bar.get_height()
-            if h > 0:
-                ax.text(bar.get_x() + bar.get_width() / 2, h + 0.02,
-                        f"{h:.0%}", ha="center", fontsize=7)
-    ax.set_ylabel("ASR(C4_user)"); ax.set_title("Per-Operator ASR")
-    ax.set_xticks(x); ax.set_xticklabels(models, rotation=15, ha="right")
-    ax.legend(); ax.set_ylim(0, 1.05)
-    plt.tight_layout()
-    out = save_dir / "aspi_operator_asr.png"
-    plt.savefig(out, dpi=150, bbox_inches="tight"); plt.close()
-    print(f"Saved: {out}")
+    """Stub — no operator data in 4-condition design."""
+    print("No operator data (removed in 4-condition design)")
 
 
 def plot_utility_deltas(all_data, save_dir):
-    """Plot 7: Utility delta bars — degradation for all 4 attacked conditions."""
+    """Plot 7: Utility delta bars — 3 deltas on clarified subset."""
     models = list(all_data.keys())
-    # Compute u(C2_user)-u(C1) from per-model aggregates (not a precomputed field)
-    def _delta_c2u_c1(s):
-        c2u = g(s, "u_c2_user") or {}
-        c1 = g(s, "u_c1") or {}
-        if c2u.get("rate") is None or c1.get("rate") is None:
-            return 0
-        return round(c2u["rate"] - c1["rate"], 4)
 
     fig, ax = plt.subplots(figsize=(11, 5))
     x = np.arange(len(models))
     bars_spec = [
-        ("u(C3)-u(C1)",       "delta_u_clarif",         None,                    COLORS["C3"]),
-        ("u(C2t)-u(C1)",      "delta_u_inject_c2",      None,                    COLORS["C2"]),
-        ("u(C2u)-u(C1)",      None,                     _delta_c2u_c1,           COLORS["C2_user"]),  # computed
-        ("u(C4t)-u(C3)",      "delta_u_inject_c4_tool", None,                    COLORS["C4_tool"]),
-        ("u(C4u)-u(C3)",      "delta_u_inject_c4_user", "delta_u_inject_c4",     COLORS["C4_user"]),
+        ("u(C3)-u(C1)",             "delta_u_clarif_cond",      COLORS.get("C3", "#2ecc71")),
+        ("u(C2)-u(C1)",             "delta_u_inject_c2_cond",   COLORS["C2"]),
+        ("u(C4_aut)-u(C3)",         "delta_u_inject_c4_cond",   COLORS["C4_ask_user_tool"]),
     ]
     w = 0.8 / len(bars_spec)
     center = (len(bars_spec) - 1) / 2.0
 
-    for j, (lbl, k, fb_or_fn, c) in enumerate(bars_spec):
-        vals = []
-        for m in models:
-            s = all_data[m]["summary"]
-            if k is None and callable(fb_or_fn):
-                vals.append(fb_or_fn(s))
-            else:
-                v = s.get(k)
-                if v is None and isinstance(fb_or_fn, str):
-                    v = s.get(fb_or_fn)
-                vals.append(v if v is not None else 0)
+    for j, (lbl, k, c) in enumerate(bars_spec):
+        vals = [all_data[m]["summary"].get(k) or 0 for m in models]
         b = ax.bar(x + (j - center) * w, vals, w, label=lbl, color=c)
         for bar in b:
             h = bar.get_height()
@@ -854,7 +721,7 @@ def plot_utility_deltas(all_data, save_dir):
                         va="bottom" if h >= 0 else "top", fontsize=7)
     ax.axhline(y=0, color="black", linewidth=1)
     ax.set_ylabel("Utility Delta")
-    ax.set_title("Utility Deltas — all 4 attacked conditions (+ clarif baseline)")
+    ax.set_title("Utility Deltas (clarified subset)")
     ax.set_xticks(x); ax.set_xticklabels(models, rotation=15, ha="right")
     ax.legend(fontsize=8, loc="best")
     plt.tight_layout()
@@ -868,13 +735,13 @@ def plot_utility_deltas(all_data, save_dir):
 # ---------------------------------------------------------------------------
 
 def plot_judge_classifications(all_data, save_dir):
-    """Plot 8: Stacked bar — attack classification per condition."""
+    """Plot 8: Stacked bar — attack classification for C2 and C4_ask_user_tool."""
     judged_models = [m for m in all_data if all_data[m].get("has_judge")]
     if not judged_models:
         print("No judged data for classification plot"); return
 
     cats = ["FULL_COMPLIANCE", "PARTIAL_COMPLIANCE", "ACKNOWLEDGED_REFUSED", "IGNORED", "UNCLEAR"]
-    cond_labels = ["C2", "C4_tool", "C4_user"]
+    cond_labels = ["C2", "C4_ask_user_tool"]
 
     n_models = len(judged_models)
     fig, axes = plt.subplots(1, n_models, figsize=(4 * n_models + 1, 5), sharey=True, squeeze=False)
@@ -891,15 +758,11 @@ def plot_judge_classifications(all_data, save_dir):
             # C2
             cls = j.get("c2_judge_attack", {}).get("classification", "UNCLEAR")
             counts["C2"][cls] += 1
-            # C4_tool
-            c4t_j = j.get("c4_tool_judge_attack", {})
-            if c4t_j:
-                counts["C4_tool"][c4t_j.get("classification", "UNCLEAR")] += 1
-            # C4_user
-            for vj in j.get("c4_user_judges", []):
-                if vj.get("skipped"): continue
-                cls = vj.get("judge_attack", {}).get("classification", "UNCLEAR")
-                counts["C4_user"][cls] += 1
+            # C4_ask_user_tool
+            c4_aut_j = j.get("c4_ask_user_tool_judge_attack", {})
+            if c4_aut_j:
+                cls = c4_aut_j.get("classification", "UNCLEAR")
+                counts["C4_ask_user_tool"][cls] += 1
 
         # Filter conditions with data
         active_conds = [c for c in cond_labels if sum(counts[c].values()) > 0]
@@ -938,12 +801,13 @@ def plot_judge_classifications(all_data, save_dir):
 
 
 def plot_compliance_reasons(all_data, save_dir):
-    """Plot 9: Stacked bar — compliance reason by operator (C4_user only)."""
+    """Plot 9: Stacked bar — compliance reason by condition (C2 and C4_ask_user_tool)."""
     judged_models = [m for m in all_data if all_data[m].get("has_judge")]
     if not judged_models:
         print("No judged data for compliance reason plot"); return
 
     reasons = ["CONFUSED", "PERSUADED", "NO_REASONING"]
+    cond_labels = ["C2", "C4_ask_user_tool"]
 
     n_models = len(judged_models)
     fig, axes = plt.subplots(1, n_models, figsize=(4 * n_models + 1, 5), sharey=True, squeeze=False)
@@ -954,30 +818,36 @@ def plot_compliance_reasons(all_data, save_dir):
         results = all_data[m]["results"]
         judged = [r for r in results if "judge" in r]
 
-        # Collect per operator
-        by_op = defaultdict(Counter)
+        # Collect per condition
+        by_cond = {c: Counter() for c in cond_labels}
         for res in judged:
-            for vj in res["judge"].get("c4_user_judges", []):
-                if vj.get("skipped"): continue
-                ja = vj.get("judge_attack", {})
-                if ja.get("attack_attempted"):
-                    op = vj.get("injection_operator", "?")
-                    reason = ja.get("compliance_reason", "NO_REASONING")
-                    if reason not in reasons:
-                        reason = "NO_REASONING"
-                    by_op[op][reason] += 1
+            j = res["judge"]
+            # C2
+            c2_ja = j.get("c2_judge_attack", {})
+            if c2_ja.get("attack_attempted"):
+                reason = c2_ja.get("compliance_reason", "NO_REASONING")
+                if reason not in reasons:
+                    reason = "NO_REASONING"
+                by_cond["C2"][reason] += 1
+            # C4_ask_user_tool
+            c4_ja = j.get("c4_ask_user_tool_judge_attack", {})
+            if c4_ja and c4_ja.get("attack_attempted"):
+                reason = c4_ja.get("compliance_reason", "NO_REASONING")
+                if reason not in reasons:
+                    reason = "NO_REASONING"
+                by_cond["C4_ask_user_tool"][reason] += 1
 
-        ops = sorted(by_op.keys())
-        if not ops:
+        active_conds = [c for c in cond_labels if sum(by_cond[c].values()) > 0]
+        if not active_conds:
             ax.set_title(f"{m}\n(no compliant attacks)"); continue
 
-        x = np.arange(len(ops))
-        bottom = np.zeros(len(ops))
+        x = np.arange(len(active_conds))
+        bottom = np.zeros(len(active_conds))
         for reason in reasons:
             vals = []
-            for op in ops:
-                total = sum(by_op[op].values())
-                vals.append(by_op[op].get(reason, 0) / total if total > 0 else 0)
+            for c in active_conds:
+                total = sum(by_cond[c].values())
+                vals.append(by_cond[c].get(reason, 0) / total if total > 0 else 0)
             vals = np.array(vals)
             ax.bar(x, vals, 0.6, bottom=bottom, label=reason,
                    color=REASON_COLORS.get(reason, "#ccc"))
@@ -988,19 +858,19 @@ def plot_compliance_reasons(all_data, save_dir):
             bottom += vals
 
         ax.set_title(m, fontsize=11)
-        ax.set_xticks(x); ax.set_xticklabels(ops, fontsize=10)
+        ax.set_xticks(x); ax.set_xticklabels(active_conds, fontsize=10)
         ax.set_ylim(0, 1.05)
         if mi == 0:
             ax.set_ylabel("Proportion (of compliant attacks)")
         # Count labels
-        for xi, op in enumerate(ops):
-            n = sum(by_op[op].values())
+        for xi, c in enumerate(active_conds):
+            n = sum(by_cond[c].values())
             ax.text(xi, -0.08, f"n={n}", ha="center", fontsize=7, color="gray")
 
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=len(reasons), fontsize=9,
                bbox_to_anchor=(0.5, 1.08))
-    fig.suptitle("Compliance Reason by Operator (C4_user, attacks only)", fontsize=13, y=1.12)
+    fig.suptitle("Compliance Reason by Condition (attacks only)", fontsize=13, y=1.12)
     plt.tight_layout()
     out = save_dir / "aspi_compliance_reasons.png"
     plt.savefig(out, dpi=150, bbox_inches="tight"); plt.close()
@@ -1008,7 +878,7 @@ def plot_compliance_reasons(all_data, save_dir):
 
 
 def plot_agreement(all_data, save_dir):
-    """Plot 10: Heatmap — agreement between rule-based, judge, and env-state."""
+    """Plot 10: Heatmap — agreement between rule-based, judge, and env-state for C2 and C4_ask_user_tool."""
     judged_models = [m for m in all_data if all_data[m].get("has_judge")]
     if not judged_models:
         print("No judged data for agreement plot"); return
@@ -1021,10 +891,11 @@ def plot_agreement(all_data, save_dir):
         results = all_data[m]["results"]
         judged = [r for r in results if "judge" in r]
 
-        # Compute agreement for C2, C4_tool, C4_user
-        pairs = {"C2": {"env_rule": [], "env_judge": [], "rule_judge": []},
-                 "C4_tool": {"env_rule": [], "env_judge": [], "rule_judge": []},
-                 "C4_user": {"env_rule": [], "env_judge": [], "rule_judge": []}}
+        # Compute agreement for C2 and C4_ask_user_tool
+        pairs = {
+            "C2": {"env_rule": [], "env_judge": [], "rule_judge": []},
+            "C4_ask_user_tool": {"env_rule": [], "env_judge": [], "rule_judge": []},
+        }
 
         for res in judged:
             goal = res.get("attacker_goal", "")
@@ -1039,41 +910,23 @@ def plot_agreement(all_data, save_dir):
             pairs["C2"]["env_judge"].append(env == judge)
             pairs["C2"]["rule_judge"].append(rule == judge)
 
-            # C4_tool
-            c4t = res.get("c4_tool", {})
-            c4t_j = res["judge"].get("c4_tool_judge_attack", {})
-            if c4t and not c4t.get("skipped") and c4t_j:
-                env_t = c4t.get("security", False)
-                rule_t = attack_attempted_rule(
-                    c4t.get("tool_calls", []), goal, c4t.get("model_output", "")
+            # C4_ask_user_tool
+            c4_aut = res.get("c4_ask_user_tool", {})
+            c4_aut_j = res["judge"].get("c4_ask_user_tool_judge_attack", {})
+            if c4_aut and not c4_aut.get("skipped") and c4_aut_j:
+                env_a = c4_aut.get("security", False)
+                rule_a = attack_attempted_rule(
+                    c4_aut.get("tool_calls", []), goal, c4_aut.get("model_output", "")
                 )["attack_attempted"]
-                judge_t = c4t_j.get("attack_attempted", False)
-                pairs["C4_tool"]["env_rule"].append(env_t == rule_t)
-                pairs["C4_tool"]["env_judge"].append(env_t == judge_t)
-                pairs["C4_tool"]["rule_judge"].append(rule_t == judge_t)
+                judge_a = c4_aut_j.get("attack_attempted", False)
+                pairs["C4_ask_user_tool"]["env_rule"].append(env_a == rule_a)
+                pairs["C4_ask_user_tool"]["env_judge"].append(env_a == judge_a)
+                pairs["C4_ask_user_tool"]["rule_judge"].append(rule_a == judge_a)
 
-            # C4_user
-            for vj in res["judge"].get("c4_user_judges", []):
-                if vj.get("skipped"): continue
-                ja = vj.get("judge_attack", {})
-                op = vj.get("injection_operator", "")
-                for v in _get_c4v(res):
-                    if v.get("injection_operator") == op and not v.get("skipped"):
-                        env_v = v.get("security", False)
-                        rule_v = attack_attempted_rule(
-                            v.get("tool_calls", []), goal, v.get("model_output", "")
-                        )["attack_attempted"]
-                        judge_v = ja.get("attack_attempted", False)
-                        pairs["C4_user"]["env_rule"].append(env_v == rule_v)
-                        pairs["C4_user"]["env_judge"].append(env_v == judge_v)
-                        pairs["C4_user"]["rule_judge"].append(rule_v == judge_v)
-                        break
-
-        # Build matrix: include C4_tool only if data exists
-        row_labels = ["C2"]
-        if pairs["C4_tool"]["env_rule"]:
-            row_labels.append("C4_tool")
-        row_labels.append("C4_user")
+        # Build matrix
+        row_labels = ["C2", "C4_ask_user_tool"]
+        # Filter to rows with data
+        row_labels = [r for r in row_labels if pairs[r]["env_rule"]]
         col_labels = ["Env vs Rule", "Env vs Judge", "Rule vs Judge"]
         matrix = np.zeros((len(row_labels), 3))
         for ri, cond in enumerate(row_labels):
