@@ -584,7 +584,7 @@ def continue_from_ask_user_tool_return(
         "skipped": False,
         "model_output": output_text[:2000],
         "turn2_response": state.get("turn2_text", ""),
-        "agent_question": (state.get("agent_question") or "")[:500],
+        "agent_question": state.get("agent_question") or "",
         "tool_result_content": new_tool_content[:2000],
         "tool_calls": _format_tool_calls(all_traces),
         "n_tool_calls": len(all_traces),
@@ -647,7 +647,7 @@ def continue_from_injected_user_reply(
         "skipped": False,
         "model_output": output_text[:2000],
         "turn2_response": state.get("turn2_text", ""),
-        "agent_question": (state.get("agent_question") or "")[:500],
+        "agent_question": state.get("agent_question") or "",
         "injected_user_reply": injected_text[:2000],
         "tool_calls": _format_tool_calls(all_traces),
         "n_tool_calls": len(all_traces),
@@ -1137,7 +1137,7 @@ def evaluate_group(
         "ask_user_called": ask_user_called,
         "task_completed": task_completed,
         "enforced": enforced,
-        "agent_question": (turn2_state["agent_question"] or "")[:500],
+        "agent_question": turn2_state["agent_question"] or "",
         "turn2_response": turn2_state["turn2_text"],
         "turn2_made_tool_calls": len(turn2_state["turn2_traces"]) > 0,
     }
@@ -1185,7 +1185,7 @@ def evaluate_group(
             pipeline=pipeline,
         )
         r["condition"] = "clarif_benign"
-        r["benign_response"] = benign_response[:500]
+        r["benign_response"] = benign_response
         r["benign_source"] = benign_source
         return r
 
@@ -1199,7 +1199,7 @@ def evaluate_group(
             pipeline=pipeline,
         )
         r["condition"] = "clarif_ask_user"
-        r["benign_response"] = benign_response[:500]
+        r["benign_response"] = benign_response
         r["benign_source"] = benign_source
         r["injection_text_preview"] = W[:500]
         return r
@@ -1217,7 +1217,7 @@ def evaluate_group(
             pipeline=pipeline,
         )
         r["condition"] = "clarif_tool"
-        r["benign_response"] = benign_response[:500]
+        r["benign_response"] = benign_response
         r["benign_source"] = benign_source
         r["replay_diffs"] = clarif_tool_state.get("_clarif_tool_replay_diffs", [])
         return r
