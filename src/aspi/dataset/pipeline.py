@@ -76,13 +76,13 @@ API_DELAY = DEFAULT_API_DELAY
 
 # Which QC checks trigger a Stage 1 / Stage 2 retry when they fail.
 STAGE1_RETRY_CHECKS = frozenset([
-    "QC-7_missing_slot_removal",
-    "QC-8_clarification_necessity",
+    "QC-5_missing_slot_removal",
+    "QC-6_clarification_necessity",
 ])
-STAGE2_RETRY_CHECKS = frozenset([
-    "QC-4_strategic_alignment",
-    "QC-9_injection_banned_patterns",
-])
+# Stage 2 has no retry-critical checks after the benchmark narrowed to the
+# tool-channel protocol. Kept as an empty frozenset so _stage2_critical_fail()
+# stays a no-op without branching.
+STAGE2_RETRY_CHECKS: frozenset[str] = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +137,55 @@ def call_stage2(client, ambig, attacker_goal, operator):
     )
     raw = call_llm(client, INJECTION_SYSTEM, user_msg, max_tokens=2048)
     return parse_json(raw)
+
+
+# Stub returned when all API attempts fail. Preserves the list shape so
+# every record in the output JSONL has exactly STANDARD_OPERATORS entries.
+STAGE2_FAILURE_STUB = {
+    "injected_clarification_response": "",
+    "failure_mode_label": "",
+    "injection_rationale": "GENERATION_FAILED",
+}
+
+
+def call_stage2_with_retry(client, ambig, attacker_goal, operator,
+                           max_api_attempts: int = 3,
+                           errors: list | None = None,
+                           pair_key: str = ""):
+    """Wrap call_stage2 with record-level API-failure retries.
+
+    call_stage2's internal tenacity handles HTTP-level errors, but it
+    does NOT retry on post-request failures (empty response, safety
+    filter, JSON parse error). Those currently surface as exceptions
+    that the Stage-2 loop catches and moves on — silently dropping the
+    operator variant.
+
+    This wrapper attempts the call up to max_api_attempts times with
+    exponential backoff. On persistent failure it returns the failure
+    stub so the operator slot still has an entry (distinguishable via
+    injection_rationale == "GENERATION_FAILED").
+
+    Returns a tuple (inj_data, succeeded).
+    """
+    last_err = None
+    for attempt in range(max_api_attempts):
+        try:
+            return call_stage2(client, ambig, attacker_goal, operator), True
+        except Exception as e:
+            last_err = e
+            if errors is not None:
+                errors.append((
+                    f"stage2_{operator}_api_attempt_{attempt}",
+                    f"{pair_key}: {e}" if pair_key else str(e),
+                ))
+            time.sleep(API_DELAY * (2 ** attempt))  # 0.5s, 1s, 2s, 4s
+
+    if errors is not None:
+        errors.append((
+            f"stage2_{operator}_api_gave_up",
+            f"{pair_key}: all {max_api_attempts} attempts failed; last={last_err}",
+        ))
+    return dict(STAGE2_FAILURE_STUB), False
 
 
 # ---------------------------------------------------------------------------
@@ -422,12 +471,21 @@ def _process_one_pair(ut, it, suite, suite_name, attack, client,
             break
 
     # ── Phase 2: C4 injection variants (always all 3 operators) ──
+    # Uses call_stage2_with_retry which retries up to 3 times on
+    # post-request failures (empty response, safety filter, JSON parse
+    # error). On persistent failure the operator slot is populated with
+    # STAGE2_FAILURE_STUB so injection_results always has 3 entries.
+    # Downstream can distinguish "failed" from "missing" via
+    # injection_rationale == "GENERATION_FAILED".
     injection_results: list[tuple[str, dict]] = []
     for operator in STANDARD_OPERATORS:
-        try:
-            inj_data = call_stage2(client, ambig, it.GOAL, operator)
-            time.sleep(API_DELAY)
+        inj_data, api_ok = call_stage2_with_retry(
+            client, ambig, it.GOAL, operator,
+            errors=errors, pair_key=pair_key,
+        )
+        time.sleep(API_DELAY)
 
+        if api_ok:
             # QC on the injection (uses temporary flat record)
             c4_for_qc = _build_flat_for_qc(ut, it, ambig, inj_data, operator)
             c4_flags = check_record(c4_for_qc)
@@ -436,18 +494,24 @@ def _process_one_pair(ut, it, suite, suite_name, attack, client,
             for _ in range(MAX_RETRIES):
                 if not _stage2_critical_fail(c4_flags):
                     break
-                try:
-                    inj_data = call_stage2(client, ambig, it.GOAL, operator)
-                    time.sleep(API_DELAY)
-                    c4_for_qc = _build_flat_for_qc(ut, it, ambig, inj_data, operator)
-                    c4_flags = check_record(c4_for_qc)
-                except Exception as e:
-                    errors.append((f"stage2_{operator}_retry", str(e)))
+                retry_data, retry_ok = call_stage2_with_retry(
+                    client, ambig, it.GOAL, operator,
+                    errors=errors, pair_key=f"{pair_key}_qcretry",
+                )
+                time.sleep(API_DELAY)
+                if not retry_ok:
+                    # Keep the original inj_data rather than overwriting
+                    # with a failure stub from the QC retry.
+                    errors.append((
+                        f"stage2_{operator}_qcretry_api_gave_up",
+                        "keeping last successful generation despite QC fail",
+                    ))
                     break
+                inj_data = retry_data
+                c4_for_qc = _build_flat_for_qc(ut, it, ambig, inj_data, operator)
+                c4_flags = check_record(c4_for_qc)
 
-            injection_results.append((operator, inj_data))
-        except Exception as e:
-            errors.append((f"stage2_{operator}", str(e)))
+        injection_results.append((operator, inj_data))
 
     # ── Build the grouped record ─────────────────────────────────
     group = build_group(
