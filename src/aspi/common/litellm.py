@@ -81,8 +81,31 @@ class LiteLlmClient:
 
         Returns:
             Raw response object from the API.
+
+        Native-reasoning passthrough:
+            If the ASPI_REASONING_KWARGS env var is set to a JSON dict,
+            those kwargs are merged into the request. Enables reasoning
+            per provider (OpenAI: reasoning={"effort": ...}; Anthropic:
+            thinking={...}; Gemini: extra_body.thinkingConfig; Qwen3:
+            extra_body.enable_thinking). When unset or "{}", no
+            reasoning is requested (default, current behaviour).
         """
         params = dict(kwargs)
+
+        # Native-reasoning passthrough (opt-in via env var)
+        reasoning_kwargs_env = os.environ.get("ASPI_REASONING_KWARGS", "")
+        if reasoning_kwargs_env.strip() and reasoning_kwargs_env.strip() != "{}":
+            try:
+                import json as _json
+                reasoning_kwargs = _json.loads(reasoning_kwargs_env)
+            except Exception:
+                reasoning_kwargs = {}
+            # Deep-merge extra_body; shallow-set others
+            for k, v in reasoning_kwargs.items():
+                if k == "extra_body" and isinstance(v, dict):
+                    params["extra_body"] = {**params.get("extra_body", {}), **v}
+                else:
+                    params[k] = v
 
         # Gemini-specific: disable safety filters for security research
         if "gemini" in self.model.lower():
