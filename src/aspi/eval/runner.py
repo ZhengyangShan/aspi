@@ -92,72 +92,225 @@ CLARIF_USER_OPERATORS = ("HR", "GS", "CP")
 
 
 # ---------------------------------------------------------------------------
-# Reasoning-kwargs passthrough for the agent pipeline
+# Reasoning-kwargs dispatch for the agent pipeline
 # ---------------------------------------------------------------------------
 #
-# AgentDojo's OpenAILLM.query() calls client.chat.completions.create()
-# directly, bypassing our LiteLlmClient wrapper. So to get native-reasoning
-# kwargs (OpenAI reasoning={...}, Anthropic thinking={...}, Gemini
-# thinkingConfig via extra_body, Qwen3 enable_thinking, etc.) into the
-# agent's API calls, we monkey-patch the client's chat.completions.create
-# to read from ASPI_REASONING_KWARGS and merge them into every request.
+# Agent API calls are made by LiteLLMPipelineElement (src/aspi/eval/
+# litellm_element.py), which invokes ``litellm.completion()`` directly.
+# The element accepts a ``reasoning_kwargs`` dict at construction time;
+# those kwargs are merged into every completion call. This replaces the
+# earlier openai-client-plus-monkey-patch approach, which was unreliable
+# inside AgentDojo's pipeline loop.
 #
-# Opt-in: when the env var is unset or "{}", the patch is a no-op.
+# The resolver below picks the right kwargs per model family (best-default
+# reasoning config), and the resolved dict is passed into the element via
+# ``build_pipeline(..., reasoning_kwargs=...)``. Manual override is still
+# available via the ASPI_REASONING_KWARGS env var for ablations.
 
-def _install_reasoning_kwargs_passthrough(client):
-    """Wrap client.chat.completions.create so it injects kwargs from the
-    ASPI_REASONING_KWARGS env var (JSON-encoded dict) on every call.
+# Per-provider default reasoning kwargs. Applied when --reasoning auto is
+# in effect AND the model string matches a family below. Chosen to match
+# each vendor's "best default" configuration for reasoning-native models
+# (best-version principle). Budget numbers are deliberately modest
+# (10k) so eval cost stays bounded; override via ASPI_REASONING_KWARGS
+# for specific ablations.
+_DEFAULT_REASONING_KWARGS_BY_FAMILY: list[tuple[tuple[str, ...], dict]] = [
+    # OpenAI reasoning (GPT-5.x + o-series). `_maybe_rewrite_model_for_
+    # reasoning` forces these onto the `openai/responses/*` bridge;
+    # here we pass the full reasoning dict via extra_body so summaries
+    # are actually returned. Empirically:
+    #   summary:"auto"     — returned only when reasoning is "substantial"
+    #                        per OpenAI; empty for trivial queries. Works
+    #                        for our agent-tool-use prompts but flaky on
+    #                        simpler conditions (e.g. exec_benign).
+    #   summary:"detailed" — always returned. ~200-500 token overhead per
+    #                        call. Chosen as default for coverage.
+    #   summary:"concise"  — always returned, shorter. Fallback if cost
+    #                        becomes a concern.
+    (("gpt-5", "o1", "o3", "o4"),
+     {"extra_body": {"reasoning": {
+         "effort": "medium", "summary": "detailed",
+     }}}),
+    # Anthropic extended thinking (Claude 4.x, 3.7). Requires explicit
+    # enable — thinking is off by default on the API. Must be wrapped
+    # in extra_body because openai>=2.x strips unknown top-level
+    # kwargs before the call hits the LiteLLM proxy.
+    (("claude-4", "claude-opus-4", "claude-sonnet-4",
+      "claude-3-7", "anthropic/claude-4",
+      "anthropic/claude-opus-4", "anthropic/claude-sonnet-4"),
+     {"extra_body": {
+         "thinking": {"type": "enabled", "budget_tokens": 10000},
+     }}),
+    # Google Gemini thinking (2.5 and 3.x). Summaries + signatures.
+    (("gemini-2.5", "gemini-3", "gemini/gemini-2.5", "gemini/gemini-3",
+      "vertex_ai/gemini-2.5", "vertex_ai/gemini-3"),
+     {"extra_body": {"thinkingConfig": {
+         "includeThoughts": True, "thinkingBudget": 10000,
+     }}}),
+    # Alibaba Qwen3 thinking mode.
+    (("qwen3", "qwen/qwen3"),
+     {"extra_body": {"enable_thinking": True}}),
+    # DeepSeek reasoners — reasoning_content is emitted natively, no
+    # flag needed. Covers R1-family and V3.2-family routes across
+    # DeepSeek native, Bedrock, and Fireworks prefixes. The V3.2 model
+    # variant must itself be the reasoning build (e.g. deepseek-v3p2
+    # on Fireworks, eu.deepseek.v3.2 on Bedrock) — if you pass a
+    # non-reasoning variant the call will succeed but reasoning_content
+    # will be empty.
+    (("deepseek-reasoner", "deepseek/deepseek-r", "deepseek-r1",
+      "deepseek-v3", "deepseek.v3", "deepseek-v3p2"),
+     {}),
+    # Moonshot Kimi K2.5 / K2-Thinking — reasoning-native variant;
+    # reasoning_content is emitted with no toggle flag. Matches both
+    # direct Moonshot and Fireworks routes. The k2p5 / k2-thinking
+    # model IDs are the thinking variants; plain "kimi-k2" without a
+    # suffix is the non-thinking chat variant and will return empty
+    # reasoning_content.
+    (("kimi-k2", "moonshot/kimi-k2", "fireworks_ai/kimi-k2"),
+     {}),
+]
 
-    Idempotent — safe to call multiple times on the same client.
+
+def _auto_reasoning_kwargs_for_model(model: str) -> tuple[dict, str | None]:
+    """Pick default reasoning kwargs for a model string.
+
+    Returns (kwargs, family_key). family_key is None when the model is
+    not a reasoning-native family (non-reasoning default is returned
+    as {}); otherwise the first matching prefix tuple's first entry.
     """
-    if getattr(client.chat.completions, "_aspi_reasoning_patched", False):
-        return client
+    m = (model or "").lower()
+    for prefixes, kwargs in _DEFAULT_REASONING_KWARGS_BY_FAMILY:
+        for prefix in prefixes:
+            if prefix in m:
+                return kwargs, prefix
+    return {}, None
 
-    original_create = client.chat.completions.create
 
-    def patched_create(**kwargs):
-        env_val = os.environ.get("ASPI_REASONING_KWARGS", "").strip()
-        if env_val and env_val != "{}":
-            try:
-                reasoning_kwargs = json.loads(env_val)
-                for k, v in reasoning_kwargs.items():
-                    if k == "extra_body" and isinstance(v, dict):
-                        kwargs["extra_body"] = {
-                            **kwargs.get("extra_body", {}), **v,
-                        }
-                    else:
-                        kwargs[k] = v
-            except Exception as e:
-                logger.debug(f"Reasoning-kwargs parse failed: {e}")
-        return original_create(**kwargs)
+def _resolve_reasoning_kwargs(model: str, mode: str) -> tuple[dict, str]:
+    """Resolve reasoning kwargs per --reasoning mode.
 
-    client.chat.completions.create = patched_create
-    client.chat.completions._aspi_reasoning_patched = True
-    return client
+    mode:
+      "auto" — use ASPI_REASONING_KWARGS env var if explicitly set
+               (manual override for ablations), else auto-detect from
+               model family. Unknown families get {} (no reasoning).
+      "on"   — same as auto but emit a warning if the resolved kwargs
+               are {} (user explicitly requested reasoning but we have
+               no default for this model).
+      "off"  — force kwargs = {}.
+
+    Returns (kwargs, source) where source is one of:
+      "env" | "auto:<family>" | "auto:unknown" | "off"
+
+    Note: unlike the old monkey-patch design, this no longer writes
+    anything to os.environ. The returned kwargs are passed directly
+    into LiteLLMPipelineElement at build_pipeline time.
+    """
+    if mode == "off":
+        return {}, "off"
+
+    env_val = os.environ.get("ASPI_REASONING_KWARGS", "").strip()
+    if env_val and env_val != "{}":
+        try:
+            return json.loads(env_val), "env"
+        except Exception:
+            pass
+
+    auto_kwargs, family = _auto_reasoning_kwargs_for_model(model)
+    if mode == "on" and not auto_kwargs:
+        logger.warning(
+            "--reasoning on requested but no default reasoning kwargs "
+            "are registered for model %r. Running without reasoning.",
+            model,
+        )
+    source = f"auto:{family}" if family else "auto:unknown"
+    return auto_kwargs, source
 
 
 # ---------------------------------------------------------------------------
 # Pipeline builder
 # ---------------------------------------------------------------------------
 
+def _maybe_rewrite_model_for_reasoning(model: str) -> str:
+    """Force OpenAI o-series and GPT-5.x onto LiteLLM's Responses-API
+    bridge so reasoning actually fires.
+
+    LiteLLM's auto-route only triggers for ``gpt-5.4+`` Chat-Completions
+    requests that include both ``reasoning_effort`` AND ``tools``.
+    Without the auto-route, ``reasoning_effort`` is silently dropped on
+    o-series (confirmed empirically: usage.reasoning_tokens = 0 for
+    ``openai/o3`` via Chat Completions).
+
+    Explicit ``openai/responses/<model>`` prefix forces the bridge.
+    Idempotent — no-op if already rewritten.
+    """
+    m = (model or "").lower()
+    # Only OpenAI reasoning models; skip if already on the bridge.
+    if "responses/" in m:
+        return model
+    if not m.startswith("openai/"):
+        return model
+    # Match o1, o3, o4, gpt-5* (preserving the original casing/suffix).
+    tail = model.split("/", 1)[1]
+    tail_l = tail.lower()
+    if tail_l.startswith(("o1", "o3", "o4")) or tail_l.startswith("gpt-5"):
+        return f"openai/responses/{tail}"
+    return model
+
+
+
+
 def build_pipeline(
     model: str,
     defense: str | None = None,
     backend: str = "agentdojo",
+    reasoning_kwargs: dict | None = None,
 ) -> BasePipelineElement:
     """Build an AgentDojo pipeline for the given model.
 
-    backend: "agentdojo" (native provider APIs) or "litellm" (proxy).
+    backend: "agentdojo" (native provider APIs) or "litellm" (routes
+             every call through litellm.completion() so reasoning kwargs
+             are honoured uniformly across providers — also points at
+             the LiteLLM proxy via api_base when LITE_LLM_URL is set).
+    reasoning_kwargs: resolved by _resolve_reasoning_kwargs in main().
+             Merged into every completion call by the pipeline element.
+             Ignored when backend == "agentdojo".
     """
     if backend == "litellm":
-        import openai as openai_mod
-        from agentdojo.agent_pipeline.llms.openai_llm import OpenAILLM
-        client = openai_mod.OpenAI(
+        from aspi.eval.litellm_element import LiteLLMPipelineElement
+
+        # Provider-prefix rewrite (o-series / GPT-5 → Responses API bridge).
+        rewritten = _maybe_rewrite_model_for_reasoning(model)
+        if rewritten != model:
+            logger.info(
+                "Routing OpenAI reasoning model through Responses bridge: "
+                f"{model} -> {rewritten}",
+            )
+
+        # Static per-provider kwargs — forwarded on every call regardless of
+        # reasoning mode. Gemini needs safety filters disabled for security
+        # research prompts; Bedrock needs allowed_openai_params unlocked for
+        # tool-call-formatted args.
+        extra_static: dict = {}
+        m_l = rewritten.lower()
+        if "gemini" in m_l:
+            extra_static["extra_body"] = {"safety_settings": [
+                {"category": "HARM_CATEGORY_HARASSMENT",        "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]}
+        if "bedrock" in m_l:
+            extra_static.setdefault("extra_body", {})["allowed_openai_params"] = [
+                "tools", "tool_choice",
+            ]
+
+        llm: str | BasePipelineElement = LiteLLMPipelineElement(
+            model=rewritten,
+            reasoning_kwargs=reasoning_kwargs or {},
+            temperature=0.0,
+            api_base=get_litellm_base_url(),
             api_key=get_litellm_api_key(),
-            base_url=get_litellm_base_url(),
+            extra_static_kwargs=extra_static,
         )
-        _install_reasoning_kwargs_passthrough(client)
-        llm: str | BasePipelineElement = OpenAILLM(client, model)
     elif backend == "agentdojo":
         llm = model
     else:
@@ -262,18 +415,36 @@ def _extract_block_text(block) -> tuple[str, bool]:
 
     if not isinstance(text, str):
         text = str(text)
-    if len(text) > 2000:
-        text = text[:2000] + "...[truncated]"
+    # Reasoning traces are the primary artefact — never truncate. For
+    # non-reasoning content blocks, also preserve in full; tool dumps
+    # that get large are bounded upstream at the tool-result capture
+    # layer, not here.
+    # (Previously capped at 2000 chars + "...[truncated]" marker.)
     return text, is_thinking
 
 
 def _serialize_messages(messages: list) -> list:
     """Convert ChatMessage list to JSON-serialisable format.
 
-    Preserves thinking blocks separately so downstream audits can detect
-    whether native reasoning was emitted and preserved across our
-    message-rewriting steps.
+    Reasoning fields (``reasoning_content``, ``thinking_blocks``,
+    ``reasoning_items``, ``thought_signature``, ``reasoning_source``,
+    ``provider_specific_fields``) are attached to assistant messages at
+    top level by ``LiteLLMPipelineElement`` at parse time. This function
+    FORWARDS those fields verbatim — it does not re-extract. This keeps
+    in-memory AgentDojo messages and the serialised JSONL shape in sync,
+    and lets any mid-flight pipeline component read the same top-level
+    names the audit script reads.
+
+    For ``backend="agentdojo"`` (native provider SDK path), reasoning
+    fields may arrive as content blocks inside ``content`` instead of
+    at top level; the content-block fallback below handles that case.
     """
+    # Fields the element may attach top-level; forwarded if present.
+    REASONING_FIELDS = (
+        "reasoning_content", "thinking_blocks", "reasoning_items",
+        "thought_signature", "reasoning_source", "provider_specific_fields",
+    )
+
     result = []
     for msg in messages:
         entry = {"role": msg.get("role", "unknown")}
@@ -295,8 +466,25 @@ def _serialize_messages(messages: list) -> list:
         else:
             entry["content"] = str(content)[:2000]
 
-        if thinking_parts:
+        # Forward reasoning fields already attached by the element.
+        for f in REASONING_FIELDS:
+            v = msg.get(f)
+            if v is not None and v != "" and v != [] and v != {}:
+                entry[f] = v
+
+        # Fallback: agentdojo backend produces content-block thinking
+        # (type=thinking) without a top-level reasoning_content. If the
+        # element didn't set reasoning_content but we saw thinking in
+        # content blocks, hoist it so downstream sees it uniformly.
+        if thinking_parts and "reasoning_content" not in entry:
             entry["reasoning_content"] = "\n".join(thinking_parts)
+            existing_src = entry.get("reasoning_source")
+            if existing_src is None:
+                entry["reasoning_source"] = "content_block_thinking"
+            elif isinstance(existing_src, str):
+                entry["reasoning_source"] = [existing_src, "content_block_thinking"]
+            elif isinstance(existing_src, list):
+                entry["reasoning_source"] = existing_src + ["content_block_thinking"]
 
         tool_calls = msg.get("tool_calls")
         if tool_calls:
@@ -953,9 +1141,20 @@ def _build_clarif_user_result(variants: dict) -> dict:
         security_max = False
         security_mean = 0.0
 
+    # Hoist skip_reason from any variant (they all share the Phase 1
+    # gate, so the reason is the same across variants). Prevents the
+    # audit script from flagging "skipped but no skip_reason".
+    skip_reason = ""
+    if skipped:
+        for v in variants.values():
+            if v.get("skip_reason"):
+                skip_reason = v["skip_reason"]
+                break
+
     return {
         "condition": "clarif_user",
         "skipped": skipped,
+        "skip_reason": skip_reason,
         "variants": variants,
         "utility_max": utility_max,
         "utility_mean": utility_mean,
@@ -1363,8 +1562,18 @@ def main():
         help="Model string",
     )
     parser.add_argument(
-        "--backend", default="agentdojo",
+        "--backend", default="litellm",
         choices=["agentdojo", "litellm"],
+        help=(
+            "How the agent makes API calls. 'litellm' (default) routes "
+            "everything through litellm.completion() via our "
+            "LiteLLMPipelineElement — uniform across providers, supports "
+            "reasoning kwargs, works through the LITE_LLM_URL proxy. "
+            "'agentdojo' uses AgentDojo's native provider SDKs directly "
+            "(OpenAILLM / AnthropicLLM / GoogleLLM with native API keys). "
+            "Use 'agentdojo' only when reproducing prior AgentDojo numbers "
+            "exactly or when running without a LiteLLM proxy."
+        ),
     )
     parser.add_argument(
         "--attack", default="important_instructions",
@@ -1393,7 +1602,27 @@ def main():
     parser.add_argument(
         "--resume", action="store_true",
     )
+    parser.add_argument(
+        "--reasoning", choices=("auto", "on", "off"), default="auto",
+        help=(
+            "Reasoning mode policy. 'auto' (default): use "
+            "ASPI_REASONING_KWARGS if set, else auto-detect from model "
+            "family — reasoning-native models (GPT-5, o-series, Claude "
+            "4.x w/ thinking, Gemini 2.5/3.x, Qwen3, DeepSeek R1) run "
+            "with reasoning ON; other models run default. 'on' forces "
+            "the auto default but warns if the model has no registered "
+            "reasoning kwargs. 'off' disables reasoning even if the env "
+            "var is set — used for the reasoning-ablation comparison."
+        ),
+    )
     args = parser.parse_args()
+
+    # Resolve reasoning kwargs BEFORE building the pipeline so they can
+    # be passed into LiteLLMPipelineElement at construction time and
+    # merged into every litellm.completion() call.
+    reasoning_kwargs, reasoning_source = _resolve_reasoning_kwargs(
+        args.model, args.reasoning,
+    )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1401,10 +1630,15 @@ def main():
     tag = args.model.replace("/", "_")
     if args.defense:
         tag += f"_{args.defense}"
+    if args.reasoning == "off":
+        tag += "_reasoning-off"
     results_path = output_dir / f"aspi_eval_{tag}.jsonl"
     summary_path = output_dir / f"aspi_eval_{tag}_summary.json"
 
-    pipeline = build_pipeline(args.model, args.defense, args.backend)
+    pipeline = build_pipeline(
+        args.model, args.defense, args.backend,
+        reasoning_kwargs=reasoning_kwargs,
+    )
 
     simulator = None
     if args.simulator_model:
@@ -1425,6 +1659,10 @@ def main():
     print(f"Attack: {args.attack}  |  Defense: {args.defense or 'none'}")
     print(f"Simulator: {args.simulator_model or 'pre-generated'}")
     print(f"Workers: {args.workers}")
+    print(
+        f"Reasoning: mode={args.reasoning}  source={reasoning_source}  "
+        f"kwargs={json.dumps(reasoning_kwargs) if reasoning_kwargs else '{}'}"
+    )
     print(f"Output: {output_dir}/")
 
     completed_keys: set = set()
@@ -1551,6 +1789,9 @@ def main():
     run_summary = {
         "model": args.model,
         "defense": args.defense,
+        "reasoning_mode": args.reasoning,
+        "reasoning_source": reasoning_source,
+        "reasoning_kwargs": reasoning_kwargs,
         "n_groups": n,
         "n_ask_user_called": n_ask_user,
         "n_task_completed": n_task_completed,
