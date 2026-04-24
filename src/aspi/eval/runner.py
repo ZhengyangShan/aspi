@@ -316,13 +316,63 @@ def build_pipeline(
     else:
         raise ValueError(f"Unknown backend: {backend!r}")
 
-    pipeline = AgentPipeline.from_config(PipelineConfig(
-        llm=llm,
-        defense=defense,
-        model_id=None,
-        system_message_name=None,
-        system_message=ASPI_SYSTEM_PROMPT,
-    ))
+    # Defenses that need custom wiring because AgentDojo's from_config
+    # either requires an OpenAILLM (``tool_filter``) or does not ship
+    # them (``prompt_guard_2_universal``).
+    if backend == "litellm" and defense in (
+        "tool_filter", "prompt_guard_2_universal",
+    ):
+        from agentdojo.agent_pipeline.agent_pipeline import AgentPipeline as AdP
+        from agentdojo.agent_pipeline.basic_elements import (
+            InitQuery, SystemMessage,
+        )
+        from agentdojo.agent_pipeline.tool_execution import (
+            ToolsExecutionLoop, ToolsExecutor, tool_result_to_str,
+        )
+
+        system_msg = SystemMessage(ASPI_SYSTEM_PROMPT)
+        init_q = InitQuery()
+
+        if defense == "tool_filter":
+            # Our custom filter — uses litellm.completion + hard-allowlists
+            # ``ask_user`` so Phase 1 clarification conditions always run.
+            from aspi.defenses.tool_filter import (
+                AskUserAwareLiteLLMToolFilter,
+            )
+            filter_elem = AskUserAwareLiteLLMToolFilter(
+                model=rewritten,
+                api_base=get_litellm_base_url(),
+                api_key=get_litellm_api_key(),
+            )
+            pipeline = AdP([
+                system_msg, init_q, filter_elem, llm,
+                ToolsExecutionLoop([ToolsExecutor(tool_result_to_str), llm]),
+            ])
+            pipeline.name = f"{model}-{defense}"
+        else:  # prompt_guard_2_universal
+            # Channel-agnostic classifier — scans tool returns AND user
+            # messages (after the first). Inserted in both the outer
+            # pipeline (scans init query) and inside the tools loop
+            # (scans each new tool return).
+            from aspi.defenses.prompt_guard import (
+                PromptGuardUniversalDetector,
+            )
+            detector = PromptGuardUniversalDetector()
+            pipeline = AdP([
+                system_msg, init_q, detector, llm,
+                ToolsExecutionLoop(
+                    [ToolsExecutor(tool_result_to_str), detector, llm],
+                ),
+            ])
+            pipeline.name = f"{model}-{defense}"
+    else:
+        pipeline = AgentPipeline.from_config(PipelineConfig(
+            llm=llm,
+            defense=defense,
+            model_id=None,
+            system_message_name=None,
+            system_message=ASPI_SYSTEM_PROMPT,
+        ))
 
     if pipeline.name is None:
         pipeline.name = model
@@ -1582,8 +1632,16 @@ def main():
     parser.add_argument(
         "--defense", default=None,
         choices=[
-            "tool_filter", "transformers_pi_detector",
-            "spotlighting_with_delimiting", "repeat_user_prompt",
+            # AgentDojo built-ins (work via AgentPipeline.from_config):
+            "transformers_pi_detector",
+            "spotlighting_with_delimiting",
+            "repeat_user_prompt",
+            # ASPI custom defenses (see src/aspi/defenses/):
+            #   tool_filter — LiteLLM-based, hard-allowlists ask_user
+            #   prompt_guard_2_universal — scans tool outputs AND user
+            #     messages (after the first), channel-agnostic
+            "tool_filter",
+            "prompt_guard_2_universal",
         ],
     )
     parser.add_argument("--suite", default=None, help="Only evaluate this suite")
@@ -1668,15 +1726,46 @@ def main():
     completed_keys: set = set()
     all_results = []
     if args.resume and results_path.exists():
+        # Dedup on read: if the JSONL already has duplicate rows (e.g.
+        # from an earlier concurrent launch), last-write-wins. This
+        # prevents double-counting in summaries and matches the semantic
+        # of "the most recent attempt for this group is authoritative".
+        dedup_map: dict = {}
+        total_rows = 0
         with open(results_path) as f:
             for line in f:
                 if not line.strip():
                     continue
-                r = json.loads(line)
-                key = (r.get("suite", ""), r.get("user_task_id", ""), r.get("injection_task_id", ""))
-                completed_keys.add(key)
-                all_results.append(r)
-        print(f"Resume: {len(completed_keys)} groups already done, skipping")
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    # Partial / corrupted tail line — skip. The group
+                    # will be re-run on this resume.
+                    continue
+                total_rows += 1
+                key = (r.get("suite", ""), r.get("user_task_id", ""),
+                       r.get("injection_task_id", ""))
+                dedup_map[key] = r  # last occurrence wins
+        completed_keys = set(dedup_map.keys())
+        all_results = list(dedup_map.values())
+        if total_rows > len(dedup_map):
+            dup_count = total_rows - len(dedup_map)
+            print(
+                f"Resume: {total_rows} rows on disk → {len(dedup_map)} unique "
+                f"keys ({dup_count} duplicate rows deduplicated — will be "
+                f"rewritten on next flush)",
+            )
+            # Rewrite the file once now so downstream tools see a clean
+            # deduplicated JSONL even if this run completes nothing new.
+            bak = results_path.with_suffix(results_path.suffix + ".pre-dedup.bak")
+            if not bak.exists():
+                bak.write_bytes(results_path.read_bytes())
+                print(f"  backup: {bak.name}")
+            with open(results_path, "w") as f:
+                for r in all_results:
+                    f.write(json.dumps(r) + "\n")
+        else:
+            print(f"Resume: {len(completed_keys)} groups already done, skipping")
         groups = [
             grp for grp in groups
             if (grp.get("suite", ""), grp.get("user_task_id", ""), grp.get("injection_task_id", ""))
@@ -1741,6 +1830,23 @@ def main():
 
                         r = payload
                         r["elapsed_seconds"] = round(group_elapsed, 1)
+                        key = (
+                            r.get("suite", ""),
+                            r.get("user_task_id", ""),
+                            r.get("injection_task_id", ""),
+                        )
+                        # Write-time dedup guard: if another process (or
+                        # a concurrent thread) already wrote this group,
+                        # do not append it again. Prevents duplicates
+                        # when two jobs happen to target the same
+                        # output file.
+                        if key in completed_keys:
+                            tqdm.write(
+                                f"  [SKIP DUP] {suite} {ut}x{it} — already written"
+                            )
+                            pbar.update(1)
+                            continue
+                        completed_keys.add(key)
                         group_times.append(group_elapsed)
                         all_results.append(r)
                         out.write(json.dumps(r) + "\n")
