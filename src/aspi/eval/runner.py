@@ -1952,8 +1952,6 @@ def main():
 
     print(f"\n  Results:  {results_path}")
     print(f"  Summary:  {summary_path}")
-    print(f"\n  Next: python scripts/run_judge.py {results_path}")
-    print(f"        python scripts/analyze.py --add \"{args.model}\" {results_path} --summary")
 
 
 if __name__ == "__main__":
