@@ -9,14 +9,7 @@ When a user prompt is ambiguous, an agent asks a clarifying question. The user's
 ASPI extends this single hypothesis into a structured 8-condition matrix that varies **state** (execution vs clarification), **channel** (tool output vs first-user vs follow-up-user), and **wrapper** (raw attacker text vs `ImportantInstructionsAttack`-wrapped) so that the state effect is paired-comparable against the channel effect and the wrapper effect.
 
 
-## 2×2 Experimental Design
 
-The benchmark is a 2×2 over **state** (execution vs clarification) × **channel** (tool-output vs user-message), plus two clean baselines (C1, C3):
-
-| | **Tool channel** (injection in tool output) | **User channel** (attack in user message) |
-|---|---|---|
-| **Execution state** | **C2_tool** (canonical AgentDojo injection) | **C2_user** ⚠ *control, not an injection* |
-| **Clarification state** | **C4_tool** (injection in clarif state) | **C4_user** (clarif-channel injection) |
 
 ## 6-Condition Design
 
