@@ -4,7 +4,10 @@ A benchmark for measuring LLM agent vulnerability during clarification states wi
 
 ## Key Idea
 
-When a user prompt is ambiguous, an agent asks a clarifying question. The user's response to that question opens a **new injection channel** which is the attacker can embed malicious instructions inside the clarification answer. This channel requires no environment access but only a crafted user message.
+When a user prompt is ambiguous, an agent asks a clarifying question. The user's response opens a **new injection channel**: the attacker can embed malicious instructions inside the clarification answer. This channel requires no environment access, only a crafted user message.
+
+ASPI extends this single hypothesis into a structured 8-condition matrix that varies **state** (execution vs clarification), **channel** (tool output vs first-user vs follow-up-user), and **wrapper** (raw attacker text vs `ImportantInstructionsAttack`-wrapped) so that the state effect is paired-comparable against the channel effect and the wrapper effect.
+
 
 ## 2×2 Experimental Design
 
