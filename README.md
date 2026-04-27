@@ -236,7 +236,7 @@ All computed from saved JSONL — no model re-running needed.
 | Paired bootstrap CI + McNemar | Per-group paired deltas with B=1000 bootstrap and exact McNemar p-values |
 
 
-### Level 3: LLM-as-Judge
+### LLM-as-Judge
 
 LLM classifies the full conversation including the hidden reasoning (when present). Richer than rule-based — understands context and intent.
 
