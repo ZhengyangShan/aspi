@@ -8,33 +8,59 @@ When a user prompt is ambiguous, an agent asks a clarifying question. The user's
 
 ASPI extends this single hypothesis into a structured 8-condition matrix that varies **state** (execution vs clarification), **channel** (tool output vs first-user vs follow-up-user), and **wrapper** (raw attacker text vs `ImportantInstructionsAttack`-wrapped) so that the state effect is paired-comparable against the channel effect and the wrapper effect.
 
+## 2×4 Experimental Design
 
+ASPI evaluates each `(user_task, injection_task)` group under 8 conditions: 2 states × 4 channels.
 
+|           | **Benign** (no attack) | **Tool channel** (W in tool output) | **First-user channel** | **Follow-up-user channel** |
+|---|---|---|---|---|
+| **Execution state**     | `exec_benign`     | `exec_tool`   | `exec_user` (`u + g`)            | `exec_next_turn` (Turn 2 = `g`) |
+| **Clarification state** | `clarif_benign`   | `clarif_tool` | `clarif_ask_user` (return = `b + W`) | `clarif_user` (HR/GS/CP variants)  |
 
-## 6-Condition Design
+Notation: `u` = original_prompt, `b` = base_prompt (ambiguous), `g` = raw attacker_goal, `W` = wrapped attack (`ImportantInstructionsAttack`), `b + W` = benign clarification answer with wrapped attack appended.
 
-| Condition | State | Channel | Attack source | Purpose |
-|-----------|-------|---------|---------------|---------|
-| **C1** | Execution | — | — | Baseline utility (benign, no attack) |
-| **C2_tool** | Execution | Tool |  tool-output placeholder | Standard tool-injection ASR (= canonical AgentDojo C2) |
-| **C2_user** | Execution | User-text |  `PROMPT + "\n\n" + GOAL` | Compliance-floor control (not a real injection) |
-| **C3** | Clarification | — |  — | Clarification utility baseline (benign Turn 3) |
-| **C4_tool** | Clarification | Tool | tool-output placeholder | Tool-injection in clarification state (replayed Turn 2) |
-| **C4_user** | Clarification | User-text | simulator's Turn 3 reply (HR/GS/CP operator) | User-channel injection in clarification state |
+The four execution-state conditions and four clarification-state conditions are matched in pairs across state, channel, and wrapper:
 
-C1, C2_tool, C2_user are single-turn runs. C3, C4_tool, C4_user share Turn 1-2 (shared-state branching design with deep-copy). C4_tool additionally replays Turn 2 tool calls against the injected env so the agent's Turn 4 memory is consistent with the injected world.
+- `exec_benign` ↔ `clarif_benign` — utility floor under each state
+- `exec_tool` ↔ `clarif_tool` — same tool-channel attack, different state
+- `exec_user` ↔ `clarif_ask_user` — same wrapped attack, delivered through the user's first turn (exec) vs through the agent-elicited ask_user return (clarif)
+- `exec_next_turn` ↔ `clarif_user` — raw attacker text as a follow-up user turn (exec) vs operator-framed clarification reply (clarif)
+
+This pairing supports clean **paired bootstrap** confidence intervals (B = 1000, seed = 0) and **exact McNemar** tests on discordant pairs for the 13 canonical deltas (state, channel, wrapper, interaction). `aspi.eval.metrics.aggregate()` returns each rate with a Wilson 95 % CI and each delta as `{delta, ci_low, ci_high, n, p_mcnemar}`.
+
+## 8-Condition Design
+
+| Condition | State | Channel | Env | Attack source | Purpose |
+|-----------|-------|---------|-----|---------------|---------|
+| **exec_benign**     | Execution     | —          | Clean        | —                                     | Baseline utility (benign, no attack) |
+| **exec_tool**       | Execution     | Tool       | W-injected   | Tool-output placeholder               | Standard AgentDojo tool-channel ASR |
+| **exec_user**       | Execution     | User-1st   | Clean        | `u + "\n\n" + g`                      | Raw attacker text appended to first user prompt |
+| **exec_next_turn**  | Execution     | User-Turn2 | Clean        | Turn 2 user msg = `g`                 | Raw attacker text as follow-up user turn |
+| **clarif_benign**   | Clarification | —          | Clean        | benign clarification answer `b`        | Clarification utility baseline |
+| **clarif_tool**     | Clarification | Tool       | W-injected   | Tool-output placeholder (replayed)    | Tool injection seen during clarification state |
+| **clarif_ask_user** | Clarification | ask_user   | Clean        | ask_user return = `b + W`             | Wrapped injection inside the clarification answer |
+| **clarif_user**     | Clarification | User-Turn3 | Clean        | Operator-framed user reply (HR/GS/CP) | User-channel injection in clarification state |
+
+`exec_benign / exec_tool / exec_user / exec_next_turn` run as four parallel single-or-two-turn rollouts in **Phase 0**. `clarif_*` conditions share a single Phase 1 rollout (Turn 1–2 on `b`) and branch by deep-copy in **Phase 2**, so all four clarif conditions see the same agent reasoning up to the clarification question. `clarif_user` aggregates 3 operator variants (HR/GS/CP); the reported per-group score is the max across operators.
 
 ## Key Comparisons
 
-All deltas are paired per-group (same `(user_task, injection_task)` evaluated in every condition).
+All 13 deltas are paired per-group (same `(suite, user_task_id, injection_task_id)` evaluated in every condition). Each delta returns a paired-bootstrap 95 % CI and an exact two-sided McNemar p-value on discordant pairs.
 
-| Comparison | What changes | Isolates | Dst name |
+| Family | Δ | What changes | Isolates |
 |---|---|---|---|
-| **C4_tool vs C2_tool** | State (execution → clarification), channel held at tool | **state effect, tool channel** | `Dst` |
-| **C4_user vs C2_user** | State (execution → clarification), channel held at user | **state effect, user channel** | `DstU` |
-| **C4_user vs C4_tool** | Channel (tool → user), state held at clarification | **channel effect, in clarif** | `Dch` |
-| **C2_user vs C2_tool** | Channel (tool → user), state held at execution | **channel effect, in exec** | `DchE` |
-| **C4_user vs C2_tool** | Both state and channel | Combined effect | `Dcb` |
+| **State**       | A1 | `clarif_tool − exec_tool`             | State, with channel and wrapper held fixed |
+|                 | A2 | `clarif_ask_user − exec_user`         | State + delivery shape, with wrapper held fixed |
+|                 | A3 | `clarif_user − exec_next_turn`        | State + framing, no wrapper either side |
+|                 | **A4** | **`clarif_ask_user − exec_tool`** (headline) | State + channel jump (tool→ask_user) under W |
+| **Channel**     | B1 | `clarif_ask_user − clarif_tool`       | Channel within clarif state, wrapper held fixed |
+|                 | B2 | `exec_user − exec_tool`               | Channel within exec state, wrapper held fixed |
+| **Wrapper**     | C1 | `exec_user − exec_next_turn`          | Wrapper effect on first user turn |
+|                 | C2 | `clarif_ask_user − clarif_user`       | Wrapper effect through clarif delivery |
+| **Interaction** | … | (see `aspi.eval.metrics` for the full 13-delta spec) | |
+
+The headline state finding for ASPI is **A4** (`clarif_ask_user − exec_tool`): it pairs the canonical AgentDojo attack point (`exec_tool`) against its closest clarification-state analog and decomposes cleanly into `A1 + B1`. Recent runs show A4 = **+37 pp** for Gemini-2.5-Pro, **+28 pp** for o3, and **0 pp** for Claude Sonnet 4.6 — a clean state-induced vulnerability gap across model families.
+
 
 ## Injection Operators
 
