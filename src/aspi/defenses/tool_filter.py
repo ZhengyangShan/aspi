@@ -167,18 +167,24 @@ class ASPIToolFilter(BasePipelineElement):
         runtime: FunctionsRuntime,
         messages: Sequence[ChatMessage],
         extra_args: dict,
-    ) -> str:
-        """Resolve the trusted task string.
+    ) -> tuple[str, str]:
+        """Resolve the trusted task string and report its provenance.
 
         Order: ``extra_args["aspi_trusted_task"]`` →
         ``runtime._aspi_trusted_task`` → first user message (fallback).
+
+        Returns ``(text, source)`` where ``source`` is one of
+        ``"extra_args"``, ``"runtime"``, ``"fallback_first_user"``, or
+        ``"empty"``. The source is persisted in the audit so a result
+        file proves which channel supplied the filter input.
         """
-        trusted = (
-            extra_args.get("aspi_trusted_task")
-            or getattr(runtime, "_aspi_trusted_task", "")
-        )
-        if trusted:
-            return str(trusted)
+        from_ea = extra_args.get("aspi_trusted_task")
+        if from_ea:
+            return str(from_ea), "extra_args"
+
+        from_rt = getattr(runtime, "_aspi_trusted_task", "")
+        if from_rt:
+            return str(from_rt), "runtime"
 
         logger.warning(
             "ASPI tool-filter: no trusted task found on runtime or "
@@ -190,8 +196,8 @@ class ASPIToolFilter(BasePipelineElement):
             if msg.get("role") == "user":
                 text = self._extract_text(msg)
                 if text:
-                    return text
-        return ""
+                    return text, "fallback_first_user"
+        return "", "empty"
 
     @staticmethod
     def _tool_catalog(runtime: FunctionsRuntime) -> list[dict]:
@@ -209,8 +215,16 @@ class ASPIToolFilter(BasePipelineElement):
         return catalog
 
     @staticmethod
-    def _parse_tool_names(reply_text: str, valid_names: set[str]) -> set[str]:
-        """Prefer JSON; fall back to exact-name word-boundary matching."""
+    def _parse_tool_names(
+        reply_text: str, valid_names: set[str],
+    ) -> tuple[set[str], str]:
+        """Prefer JSON; fall back to exact-name word-boundary matching.
+
+        Returns ``(names, parser)`` where ``parser`` is one of
+        ``"json"``, ``"substring"``, or ``"empty"``. The parser is
+        recorded in the audit so we can grep for filter calls whose LLM
+        reply did not return clean JSON.
+        """
         try:
             parsed = json.loads(reply_text)
             keep_tools = parsed.get("keep_tools", [])
@@ -219,7 +233,7 @@ class ASPIToolFilter(BasePipelineElement):
                 if isinstance(name, str) and name in valid_names
             }
             if names:
-                return names
+                return names, "json"
         except Exception:
             pass
 
@@ -229,7 +243,9 @@ class ASPIToolFilter(BasePipelineElement):
             pattern = rf"(?<![A-Za-z0-9_]){re.escape(name.lower())}(?![A-Za-z0-9_])"
             if re.search(pattern, lowered):
                 names.add(name)
-        return names
+        if names:
+            return names, "substring"
+        return names, "empty"
 
     # ------------------------------------------------------------------
     # Pipeline entry
@@ -254,13 +270,33 @@ class ASPIToolFilter(BasePipelineElement):
             return query, runtime, env, messages, extra_args
 
         original_funcs = dict(runtime.functions)
-        trusted_task = self._trusted_task_text(runtime, messages, extra_args)
+        trusted_task, trusted_task_source = self._trusted_task_text(
+            runtime, messages, extra_args,
+        )
         if not trusted_task:
             # No trusted task and no user message either — cannot filter
             # meaningfully. Keep all tools; mark applied so we do not
-            # retry on subsequent pipeline calls.
+            # retry on subsequent pipeline calls. Emit a minimal audit
+            # so downstream analyses can see this happened.
             try:
                 setattr(runtime, "_aspi_tool_filter_applied", True)
+                setattr(runtime, "_aspi_tool_filter_audit", {
+                    "filter_model_raw":   self.model,
+                    "filter_model_used":  None,
+                    "agent_model":        getattr(runtime, "_aspi_agent_model", None),
+                    "trusted_task":       "",
+                    "trusted_task_len":   0,
+                    "trusted_task_source": trusted_task_source,
+                    "reply_text":         "",
+                    "reply_parser":       "skipped_no_trusted_task",
+                    "n_original":         len(original_funcs),
+                    "n_kept":             len(original_funcs),
+                    "n_dropped":          0,
+                    "kept":               sorted(original_funcs.keys()),
+                    "dropped":            [],
+                    "fallback_kept_all":  True,
+                    "always_allowed":     sorted(ALWAYS_ALLOW),
+                })
             except (AttributeError, TypeError):
                 pass  # runtime may use __slots__; filter will just retry
             return query, runtime, env, messages, extra_args
@@ -307,17 +343,19 @@ class ASPIToolFilter(BasePipelineElement):
 
         # ── Parse + enforce allowlist ────────────────────────────────
         valid_names = set(original_funcs)
-        selected_names = self._parse_tool_names(reply_text, valid_names)
+        selected_names, parser = self._parse_tool_names(reply_text, valid_names)
         for name in ALWAYS_ALLOW:
             if name in valid_names:
                 selected_names.add(name)
 
+        fallback_kept_all = False
         if not selected_names:
             logger.warning(
                 "ASPI tool-filter returned empty tool set; falling back "
-                "to all tools. Reply was: %r", reply_text[:200],
+                "to all tools. Reply text was: %r", reply_text,
             )
             kept = original_funcs
+            fallback_kept_all = True
         else:
             kept = {name: original_funcs[name] for name in selected_names}
 
@@ -327,19 +365,33 @@ class ASPIToolFilter(BasePipelineElement):
         )
 
         # ── Audit sidecar ────────────────────────────────────────────
-        # Attach a snapshot of the filter's decision to the runtime.
-        # The runner copies this onto every result dict so we can grep
-        # after the fact whether the defense fired and what it kept.
+        # Attach a complete snapshot of the filter's decision to the
+        # runtime. Stored UNTRUNCATED so a result file proves exactly
+        # which model the filter used, what task text it saw, what it
+        # received from the LLM, and how that was parsed. The runner
+        # copies this onto every condition's result dict.
         dropped = sorted(set(original_funcs) - set(kept))
         try:
             setattr(runtime, "_aspi_tool_filter_audit", {
-                "trusted_task": trusted_task[:500],
-                "n_original": len(original_funcs),
-                "n_kept": len(kept),
-                "n_dropped": len(dropped),
-                "kept": sorted(kept.keys()),
-                "dropped": dropped,
-                "reply_text": reply_text[:500],
+                # WHO ran the filter
+                "filter_model_raw":   self.model,
+                "filter_model_used":  effective_model,
+                "agent_model":        getattr(runtime, "_aspi_agent_model", None),
+                # WHAT it saw
+                "trusted_task":        trusted_task,
+                "trusted_task_len":    len(trusted_task),
+                "trusted_task_source": trusted_task_source,
+                # WHAT it returned (full reply, no truncation)
+                "reply_text":         reply_text,
+                "reply_parser":       parser,
+                # WHAT it decided
+                "n_original":         len(original_funcs),
+                "n_kept":              len(kept),
+                "n_dropped":          len(dropped),
+                "kept":                sorted(kept.keys()),
+                "dropped":            dropped,
+                "fallback_kept_all":  fallback_kept_all,
+                "always_allowed":     sorted(ALWAYS_ALLOW),
             })
         except (AttributeError, TypeError):
             pass
