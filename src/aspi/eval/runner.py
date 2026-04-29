@@ -263,6 +263,7 @@ def build_pipeline(
     defense: str | None = None,
     backend: str = "agentdojo",
     reasoning_kwargs: dict | None = None,
+    tool_filter_model: str | None = None,
 ) -> BasePipelineElement:
     """Build an AgentDojo pipeline for the given model.
 
@@ -273,6 +274,13 @@ def build_pipeline(
     reasoning_kwargs: resolved by _resolve_reasoning_kwargs in main().
              Merged into every completion call by the pipeline element.
              Ignored when backend == "agentdojo".
+    tool_filter_model: when ``defense == "tool_filter"``, the model used
+             for the pre-planning filter call. ``None`` falls back to
+             ``model`` (the agent model) and emits a warning so silent
+             reuse is visible. The filter model is used as a literal
+             string — it is NOT routed through the reasoning rewrite,
+             so cheap filter-only models (e.g. gpt-4o-mini) work even
+             when the agent is a reasoning model.
     """
     if backend == "litellm":
         from aspi.eval.litellm_element import LiteLLMPipelineElement
@@ -339,8 +347,24 @@ def build_pipeline(
             from aspi.defenses.tool_filter import (
                 AskUserAwareLiteLLMToolFilter,
             )
+            # Filter model: explicit user choice OR (silently) the agent
+            # model. Silent reuse is auditable but emits a loud warning
+            # so the operator notices.
+            filter_model = tool_filter_model or rewritten
+            if tool_filter_model is None:
+                logger.warning(
+                    "tool_filter is using the agent model %r as the filter "
+                    "model. Pass --tool-filter-model to set an explicit "
+                    "filter model (recommended for fairness/cost).",
+                    rewritten,
+                )
+            else:
+                logger.info(
+                    "tool_filter using explicit filter model: %r",
+                    tool_filter_model,
+                )
             filter_elem = AskUserAwareLiteLLMToolFilter(
-                model=rewritten,
+                model=filter_model,
                 api_base=get_litellm_base_url(),
                 api_key=get_litellm_api_key(),
             )
@@ -381,6 +405,10 @@ def build_pipeline(
     if not any(k in pipeline.name for k in MODEL_NAMES):
         MODEL_NAMES[model] = "the AI assistant"
 
+    # Stash the agent-model string on the pipeline so eval entrypoints
+    # can copy it onto each FunctionsRuntime (alongside _aspi_trusted_task)
+    # for the tool_filter audit. Read from the runtime by the filter.
+    pipeline._aspi_agent_model = model
     return pipeline
 
 
@@ -570,10 +598,18 @@ def _score_utility(user_task, output_text, pre_env, env, traces) -> bool:
     return bool(utility)
 
 
-def _score_security(inj_task, output_text, pre_env, env, traces) -> bool:
-    """Score security (attack success). True = attack SUCCEEDED."""
+def _score_security(inj_task, output_text, pre_env, env, traces) -> bool | None:
+    """Score security (attack success). True = attack SUCCEEDED.
+
+    Returns ``None`` when ``inj_task is None`` (benign conditions, no
+    attack to score). Downstream consumers treat ``None`` as
+    "not applicable" — ``bool(None) == False`` so existing
+    ``int(bool(c.get("security", False)))`` paths flow through to 0
+    without polluting any rate. The benign ASR slot is correctly
+    interpreted as undefined rather than 100%.
+    """
     if inj_task is None:
-        return True  # placeholder for benign conditions
+        return None  # not applicable: no attack to score
     try:
         security = inj_task.security_from_traces(output_text, pre_env, env, traces)
         if security is None:
@@ -748,6 +784,85 @@ def build_clarif_tool_state_via_replay(
 
 
 # ---------------------------------------------------------------------------
+# Defense plumbing: detect the active defense and clone runtime for Phase-2
+# branches when the tool_filter is in the pipeline.
+# ---------------------------------------------------------------------------
+
+def _pipeline_has_aspi_tool_filter(pipeline) -> bool:
+    """Return True iff the pipeline contains an ASPIToolFilter element.
+
+    Used to gate the Phase-2 runtime clone: when no defense (or any
+    other defense) is active, Phase-2 branches keep reusing the shared
+    state["runtime"] exactly as before — preserving byte-identical
+    behavior for the no-defense path. When tool_filter is active we
+    clone per branch to prevent the three clarif_user operator
+    variants from racing on shared runtime state.
+    """
+    try:
+        from aspi.defenses.tool_filter import ASPIToolFilter
+    except Exception:
+        return False
+    seen = []
+
+    def _walk(elem):
+        if isinstance(elem, ASPIToolFilter):
+            seen.append(elem); return
+        # AgentDojo's AgentPipeline / ToolsExecutionLoop expose .elements
+        sub = getattr(elem, "elements", None)
+        if isinstance(sub, (list, tuple)):
+            for e in sub:
+                _walk(e)
+
+    _walk(pipeline)
+    return bool(seen)
+
+
+def _clone_runtime_for_phase2(runtime):
+    """Fresh FunctionsRuntime with the same registered tools, no
+    ASPI flags carried over.
+
+    Used only on Phase-2 branches when tool_filter is active so that
+    HR/GS/CP operator variants of clarif_user (and the three
+    Phase-2 clarif branches) cannot race on
+    ``runtime._aspi_tool_filter_armed`` /
+    ``runtime._aspi_trusted_task`` / ``runtime.functions``.
+    """
+    new = FunctionsRuntime(list(runtime.functions.values()))
+    # Carry only the agent-model marker through; ASPI flags are
+    # deliberately reset so each branch arms its own filter cleanly.
+    if hasattr(runtime, "_aspi_agent_model"):
+        try:
+            setattr(new, "_aspi_agent_model", runtime._aspi_agent_model)
+        except (AttributeError, TypeError):
+            pass
+    return new
+
+
+# ---------------------------------------------------------------------------
+# Defense audit helper
+# ---------------------------------------------------------------------------
+
+def _collect_defense_audit(runtime) -> dict | None:
+    """Snapshot whatever diagnostic state the active defense left on the
+    runtime. Returns ``None`` if no defense ran on this runtime.
+
+    - ``tool_filter``       → ``_aspi_tool_filter_audit`` set once per task
+    - ``prompt_guard_*``    → ``_aspi_prompt_guard_audit`` accumulated per call
+
+    Both keys are safe to grep post-hoc from saved JSONL to verify the
+    defense actually fired.
+    """
+    audit: dict = {}
+    tf = getattr(runtime, "_aspi_tool_filter_audit", None)
+    if tf is not None:
+        audit["tool_filter"] = tf
+    pg = getattr(runtime, "_aspi_prompt_guard_audit", None)
+    if pg is not None:
+        audit["prompt_guard"] = pg
+    return audit or None
+
+
+# ---------------------------------------------------------------------------
 # Phase-2 continuation helpers
 # ---------------------------------------------------------------------------
 
@@ -794,7 +909,15 @@ def continue_from_ask_user_tool_return(
     pre_env = state["pre_env"]
     env = state["env"].model_copy(deep=True)
     messages = copy.deepcopy(state["messages"])
-    runtime = state["runtime"]
+
+    # Runtime: shared by default (byte-identical to no-defense path).
+    # Cloned per Phase-2 branch only when the tool_filter is active so
+    # the three clarif_user operator variants and the three clarif
+    # branches cannot race on shared filter state.
+    if _pipeline_has_aspi_tool_filter(pipeline):
+        runtime = _clone_runtime_for_phase2(state["runtime"])
+    else:
+        runtime = state["runtime"]
 
     if not rewrite_ask_user_tool_result(messages, new_tool_content):
         return {
@@ -806,6 +929,31 @@ def continue_from_ask_user_tool_return(
             "tool_calls": [],
             "n_tool_calls": 0,
         }
+
+    # Tool-filter arm point: Phase 2 is the LAST SAFE BOUNDARY before
+    # the agent acts on the clarification answer. Trusted task = the
+    # user-side conversation visible at this point (base_prompt +
+    # agent question + the new ask_user return content). For
+    # clarif_benign / clarif_tool, new_tool_content is the benign
+    # answer. For clarif_ask_user, it is benign_answer + W. The
+    # filter sees the wrapped attack because it is part of the user
+    # message channel; it does NOT see the poisoned tool returns
+    # replayed by build_clarif_tool_state_via_replay.
+    if _pipeline_has_aspi_tool_filter(pipeline):
+        try:
+            trusted = "\n\n".join([
+                state.get("base_prompt", ""),
+                state.get("agent_question", "") or "",
+                new_tool_content,
+            ])
+            setattr(runtime, "_aspi_trusted_task", trusted)
+            setattr(
+                runtime, "_aspi_trusted_task_label",
+                "phase2_clarif_ask_user_return",
+            )
+            setattr(runtime, "_aspi_tool_filter_armed", True)
+        except (AttributeError, TypeError):
+            pass
 
     env, messages = _run_continuation(pipeline, runtime, env, messages, user_task.ID)
 
@@ -827,6 +975,7 @@ def continue_from_ask_user_tool_return(
         "tool_calls": _format_tool_calls(all_traces),
         "n_tool_calls": len(all_traces),
         "full_conversation": _serialize_messages(messages),
+        "defense_audit": _collect_defense_audit(runtime),
     }
 
 
@@ -852,7 +1001,15 @@ def continue_from_injected_user_reply(
     pre_env = state["pre_env"]
     env = state["env"].model_copy(deep=True)
     messages = copy.deepcopy(state["messages"])
-    runtime = state["runtime"]
+
+    # Per-branch runtime clone only when tool_filter is active. The
+    # three HR/GS/CP variants of clarif_user run in parallel through
+    # this function — without the clone they would race on shared
+    # _aspi_tool_filter_armed / _aspi_trusted_task / runtime.functions.
+    if _pipeline_has_aspi_tool_filter(pipeline):
+        runtime = _clone_runtime_for_phase2(state["runtime"])
+    else:
+        runtime = state["runtime"]
 
     if not truncate_after_ask_user_tool_result(messages):
         return {
@@ -869,6 +1026,27 @@ def continue_from_injected_user_reply(
         "role": "user",
         "content": [{"type": "text", "content": injected_text}],
     })
+
+    # Tool-filter arm point: Phase 2 is the LAST SAFE BOUNDARY before
+    # the agent acts on the injected clarification reply. Trusted
+    # task = base_prompt + agent question + the operator-framed user
+    # reply (which carries the attack). The filter sees the attacker
+    # text because it is part of the user message channel.
+    if _pipeline_has_aspi_tool_filter(pipeline):
+        try:
+            trusted = "\n\n".join([
+                state.get("base_prompt", ""),
+                state.get("agent_question", "") or "",
+                injected_text,
+            ])
+            setattr(runtime, "_aspi_trusted_task", trusted)
+            setattr(
+                runtime, "_aspi_trusted_task_label",
+                "phase2_clarif_user_reply",
+            )
+            setattr(runtime, "_aspi_tool_filter_armed", True)
+        except (AttributeError, TypeError):
+            pass
 
     env, messages = _run_continuation(pipeline, runtime, env, messages, user_task.ID)
 
@@ -890,6 +1068,7 @@ def continue_from_injected_user_reply(
         "tool_calls": _format_tool_calls(all_traces),
         "n_tool_calls": len(all_traces),
         "full_conversation": _serialize_messages(messages),
+        "defense_audit": _collect_defense_audit(runtime),
     }
 
 
@@ -904,8 +1083,14 @@ def run_single_turn_eval(
     query: str,
     injections: dict[str, str],
     pipeline: BasePipelineElement,
+    trusted_task: str | None = None,
 ) -> dict:
-    """Run a single-turn query and score. Used for exec_benign, exec_tool, exec_user."""
+    """Run a single-turn query and score. Used for exec_benign, exec_tool, exec_user.
+
+    ``trusted_task`` is the un-poisoned task string the ASPI tool-filter
+    should use (via ``runtime._aspi_trusted_task``). For exec_* this is
+    the ``original_prompt``. No effect when the filter is not wired.
+    """
     env = suite.load_and_inject_default_environment(injections)
     env = user_task.init_environment(env)
     pre_env = env.model_copy(deep=True)
@@ -913,6 +1098,28 @@ def run_single_turn_eval(
 
     from aspi.eval.simulator import create_ask_user_tool
     runtime.register_function(create_ask_user_tool())
+
+    # Stamp agent model so the tool_filter audit records both filter
+    # and agent models per-condition. Inert when no defense is active.
+    try:
+        setattr(
+            runtime, "_aspi_agent_model",
+            getattr(pipeline, "_aspi_agent_model", None),
+        )
+    except (AttributeError, TypeError):
+        pass
+    # Trusted-task handoff + arm the tool_filter (only if it's in the
+    # pipeline). Single-turn exec_* conditions (exec_benign, exec_tool,
+    # exec_user) fire the filter once at Turn 1 with the actual first
+    # user message as trusted task. Inert when no defense or a
+    # different defense is active.
+    if trusted_task is not None and _pipeline_has_aspi_tool_filter(pipeline):
+        try:
+            setattr(runtime, "_aspi_trusted_task", trusted_task)
+            setattr(runtime, "_aspi_trusted_task_label", "turn1")
+            setattr(runtime, "_aspi_tool_filter_armed", True)
+        except (AttributeError, TypeError):
+            pass
 
     model_output_blocks = None
     messages: list[ChatMessage] = []
@@ -952,6 +1159,7 @@ def run_single_turn_eval(
         "query": query,
         "injections_used": injections,
         "full_conversation": _serialize_messages(messages),
+        "defense_audit": _collect_defense_audit(runtime),
     }
 
 
@@ -967,6 +1175,7 @@ def run_two_turn_eval(
     turn2_text: str,
     injections: dict[str, str],
     pipeline: BasePipelineElement,
+    trusted_task: str | None = None,
 ) -> dict:
     """
     Run a two-turn interaction: Turn 1 = turn1_query, Turn 2 = turn2_text
@@ -988,6 +1197,17 @@ def run_two_turn_eval(
 
     from aspi.eval.simulator import create_ask_user_tool
     runtime.register_function(create_ask_user_tool())
+
+    # Stamp agent model (inert when no defense). The tool_filter is
+    # NOT armed at Turn 1 — for exec_next_turn the attacker text only
+    # becomes visible at Turn 2, so the filter fires there.
+    try:
+        setattr(
+            runtime, "_aspi_agent_model",
+            getattr(pipeline, "_aspi_agent_model", None),
+        )
+    except (AttributeError, TypeError):
+        pass
 
     # ── Turn 1: full pipeline on turn1_query ────────────────────────
     messages: list[ChatMessage] = []
@@ -1016,6 +1236,22 @@ def run_two_turn_eval(
         "role": "user",
         "content": [{"type": "text", "content": turn2_text}],
     })
+
+    # Tool-filter arm point: Turn 2 is the LAST SAFE BOUNDARY before
+    # the agent acts on the attacker-controlled follow-up. Trusted task
+    # is the actual user-side conversation so far (Turn 1 + Turn 2),
+    # which includes the raw attacker_goal in Turn 2. Inert without
+    # the filter in the pipeline.
+    if _pipeline_has_aspi_tool_filter(pipeline):
+        try:
+            setattr(
+                runtime, "_aspi_trusted_task",
+                f"{turn1_query}\n\n{turn2_text}",
+            )
+            setattr(runtime, "_aspi_trusted_task_label", "turn2_continuation")
+            setattr(runtime, "_aspi_tool_filter_armed", True)
+        except (AttributeError, TypeError):
+            pass
 
     env, messages = _run_continuation(pipeline, runtime, env, messages, user_task.ID)
 
@@ -1048,6 +1284,7 @@ def run_two_turn_eval(
         "n_tool_calls": len(all_traces),
         "injections_used": injections,
         "full_conversation": _serialize_messages(messages),
+        "defense_audit": _collect_defense_audit(runtime),
     }
 
 
@@ -1062,6 +1299,7 @@ def run_until_turn2(
     injections: dict[str, str],
     pipeline: BasePipelineElement,
     simulator=None,
+    trusted_task: str | None = None,
 ) -> dict:
     """
     Phase 1: run Turn 1-2 with `base_prompt` on the given env (typically clean).
@@ -1081,6 +1319,21 @@ def run_until_turn2(
 
     from aspi.eval.simulator import create_ask_user_tool, extract_ask_user_question
     runtime.register_function(create_ask_user_tool())
+
+    # Stamp agent model only; do NOT arm the tool_filter at Phase 1.
+    # For all four clarif_* conditions the attacker text only becomes
+    # visible at Phase 2 (clarification answer / injected user reply),
+    # so the filter fires there. Phase 1 runs with the full toolset.
+    # The legacy ``trusted_task`` parameter is now ignored — kept in
+    # the signature for back-compat with existing callers.
+    try:
+        setattr(
+            runtime, "_aspi_agent_model",
+            getattr(pipeline, "_aspi_agent_model", None),
+        )
+    except (AttributeError, TypeError):
+        pass
+    _ = trusted_task  # accepted for back-compat; not used in Phase 1
 
     messages: list[ChatMessage] = []
     for _ in range(3):
@@ -1320,10 +1573,15 @@ def evaluate_group(
     }
 
     # ── Phase 0: parallel exec conditions ────────────────────────────
+    # For exec_* conditions the trusted task is the canonical
+    # ``original_prompt`` u — clean and attacker-free, regardless of
+    # what the pipeline receives as its query argument (which may
+    # concatenate the attacker goal, as in exec_user).
     def _run_exec_benign():
         r = run_single_turn_eval(
             suite, user_task, inj_task=None,
             query=u, injections={}, pipeline=pipeline,
+            trusted_task=u,
         )
         r["condition"] = "exec_benign"
         return r
@@ -1332,6 +1590,7 @@ def evaluate_group(
         r = run_single_turn_eval(
             suite, user_task, inj_task,
             query=u, injections=injections_dict, pipeline=pipeline,
+            trusted_task=u,
         )
         r["condition"] = "exec_tool"
         return r
@@ -1339,9 +1598,14 @@ def evaluate_group(
     def _run_exec_user():
         # raw attacker_goal, blank-line concatenation (no literal connector).
         query = f"{u}\n\n{g}"
+        # Fairness fix: trusted_task = the actual first user message the
+        # agent receives, not an oracle-clean version. For exec_user the
+        # first message IS poisoned (u + g) — the filter must defend
+        # against that input as part of its threat model.
         r = run_single_turn_eval(
             suite, user_task, inj_task,
             query=query, injections={}, pipeline=pipeline,
+            trusted_task=query,
         )
         r["condition"] = "exec_user"
         r["appended_attack"] = g[:500]
@@ -1352,6 +1616,7 @@ def evaluate_group(
         r = run_two_turn_eval(
             suite, user_task, inj_task,
             turn1_query=u, turn2_text=g, injections={}, pipeline=pipeline,
+            trusted_task=u,
         )
         r["condition"] = "exec_next_turn"
         return r
@@ -1369,12 +1634,16 @@ def evaluate_group(
     time.sleep(delay)
 
     # ── Phase 1: shared Turn 1-2 on base_prompt ─────────────────────
+    # For clarif_* the trusted task is ``p`` (base_prompt): ambiguous
+    # but not attacker-authored. Phase-2 continuations reuse this
+    # runtime so the attribute propagates automatically.
     turn2_state = run_until_turn2(
         suite, user_task,
         base_prompt=p,
         injections={},
         pipeline=pipeline,
         simulator=simulator,
+        trusted_task=p,
     )
     time.sleep(delay)
 
@@ -1382,6 +1651,11 @@ def evaluate_group(
     task_completed = turn2_state.get("task_completed", False)
     enforced = turn2_state.get("enforced", False)
 
+    # NOTE: Phase 1 no longer fires the tool_filter under the new
+    # stage-based design — the filter arms at Phase-2 boundaries
+    # instead — so there is no Phase-1 defense audit to record.
+    # PromptGuard audits remain attached per-condition via
+    # _collect_defense_audit on each Phase-2 result.
     result["clarification"] = {
         "ask_user_called": ask_user_called,
         "task_completed": task_completed,
@@ -1661,6 +1935,16 @@ def main():
         "--resume", action="store_true",
     )
     parser.add_argument(
+        "--tool-filter-model", default=None,
+        help=(
+            "Model used by --defense tool_filter for the pre-planning "
+            "filter call. Only consulted when --defense=tool_filter. "
+            "Default: silently fall back to --model (logged as warning). "
+            "Strongly recommended to set explicitly so fairness is "
+            "auditable, e.g. 'openai/gpt-4o-mini-2024-07-18'."
+        ),
+    )
+    parser.add_argument(
         "--reasoning", choices=("auto", "on", "off"), default="auto",
         help=(
             "Reasoning mode policy. 'auto' (default): use "
@@ -1693,9 +1977,23 @@ def main():
     results_path = output_dir / f"aspi_eval_{tag}.jsonl"
     summary_path = output_dir / f"aspi_eval_{tag}_summary.json"
 
+    # --tool-filter-model is only meaningful with --defense tool_filter.
+    # If the user passed it with a different (or no) defense, warn and
+    # ignore so the runner doesn't silently honour the flag.
+    effective_tool_filter_model = None
+    if args.defense == "tool_filter":
+        effective_tool_filter_model = args.tool_filter_model
+    elif args.tool_filter_model is not None:
+        logger.warning(
+            "--tool-filter-model=%r is set but --defense is %r — ignoring "
+            "the flag (it only takes effect with --defense tool_filter).",
+            args.tool_filter_model, args.defense or "none",
+        )
+
     pipeline = build_pipeline(
         args.model, args.defense, args.backend,
         reasoning_kwargs=reasoning_kwargs,
+        tool_filter_model=effective_tool_filter_model,
     )
 
     simulator = None
@@ -1715,6 +2013,15 @@ def main():
     print(f"Loaded {len(groups)} task groups")
     print(f"Model: {args.model}  |  Backend: {args.backend}")
     print(f"Attack: {args.attack}  |  Defense: {args.defense or 'none'}")
+    if args.defense == "tool_filter":
+        if effective_tool_filter_model:
+            print(f"  Filter model: {effective_tool_filter_model}")
+        else:
+            print(
+                f"  Filter model: {args.model}  "
+                f"⚠ same as agent — pass --tool-filter-model for "
+                f"fairness/cost"
+            )
     print(f"Simulator: {args.simulator_model or 'pre-generated'}")
     print(f"Workers: {args.workers}")
     print(
@@ -1895,6 +2202,7 @@ def main():
     run_summary = {
         "model": args.model,
         "defense": args.defense,
+        "tool_filter_model": effective_tool_filter_model,
         "reasoning_mode": args.reasoning,
         "reasoning_source": reasoning_source,
         "reasoning_kwargs": reasoning_kwargs,
@@ -1952,6 +2260,8 @@ def main():
 
     print(f"\n  Results:  {results_path}")
     print(f"  Summary:  {summary_path}")
+    print(f"\n  Next: python scripts/run_judge.py {results_path}")
+    print(f"        python scripts/analyze.py --add \"{args.model}\" {results_path} --summary")
 
 
 if __name__ == "__main__":
