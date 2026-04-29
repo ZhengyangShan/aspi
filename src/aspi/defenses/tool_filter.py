@@ -259,14 +259,20 @@ class ASPIToolFilter(BasePipelineElement):
         messages: Sequence[ChatMessage] = [],
         extra_args: dict = {},
     ) -> tuple[str, FunctionsRuntime, Env, Sequence[ChatMessage], dict]:
-        # ── Idempotency ─────────────────────────────────────────────
-        # Filter fires ONCE per FunctionsRuntime. Subsequent pipeline
-        # calls on the same runtime (continuations, retries, Phase 2)
-        # are no-ops. Stored on the runtime rather than extra_args
-        # because BasePipelineElement.query declares ``extra_args: dict
-        # = {}`` — a mutable default arg shared across all process-wide
+        # ── Stage-based one-shot ───────────────────────────────────
+        # Filter fires only when explicitly armed by the runner via
+        # ``runtime._aspi_tool_filter_armed = True``. The runner arms
+        # at the LAST SAFE BOUNDARY before the agent acts on the
+        # condition's task context (Turn 1 for exec_benign/tool/user;
+        # Turn 2 continuation for exec_next_turn; Phase 2 continuation
+        # for clarif_*). After firing, we disarm so subsequent pipeline
+        # invocations on the same runtime do not re-fire.
+        #
+        # Stored on the runtime rather than extra_args because
+        # BasePipelineElement.query declares ``extra_args: dict = {}``
+        # — a mutable default arg shared across all process-wide
         # pipeline.query() calls.
-        if getattr(runtime, "_aspi_tool_filter_applied", False):
+        if not getattr(runtime, "_aspi_tool_filter_armed", False):
             return query, runtime, env, messages, extra_args
 
         original_funcs = dict(runtime.functions)
@@ -274,12 +280,12 @@ class ASPIToolFilter(BasePipelineElement):
             runtime, messages, extra_args,
         )
         if not trusted_task:
-            # No trusted task and no user message either — cannot filter
-            # meaningfully. Keep all tools; mark applied so we do not
-            # retry on subsequent pipeline calls. Emit a minimal audit
-            # so downstream analyses can see this happened.
+            # Filter was armed but the runner did not provide a trusted
+            # task — that is a runner bug. Disarm + emit a minimal
+            # audit so the missing-task condition is loudly visible
+            # downstream rather than silently keeping the full toolset.
             try:
-                setattr(runtime, "_aspi_tool_filter_applied", True)
+                setattr(runtime, "_aspi_tool_filter_armed", False)
                 setattr(runtime, "_aspi_tool_filter_audit", {
                     "filter_model_raw":   self.model,
                     "filter_model_used":  None,
@@ -287,6 +293,9 @@ class ASPIToolFilter(BasePipelineElement):
                     "trusted_task":       "",
                     "trusted_task_len":   0,
                     "trusted_task_source": trusted_task_source,
+                    "trusted_task_label": getattr(
+                        runtime, "_aspi_trusted_task_label", None,
+                    ),
                     "reply_text":         "",
                     "reply_parser":       "skipped_no_trusted_task",
                     "n_original":         len(original_funcs),
@@ -381,6 +390,9 @@ class ASPIToolFilter(BasePipelineElement):
                 "trusted_task":        trusted_task,
                 "trusted_task_len":    len(trusted_task),
                 "trusted_task_source": trusted_task_source,
+                "trusted_task_label":  getattr(
+                    runtime, "_aspi_trusted_task_label", None,
+                ),
                 # WHAT it returned (full reply, no truncation)
                 "reply_text":         reply_text,
                 "reply_parser":       parser,
@@ -397,8 +409,9 @@ class ASPIToolFilter(BasePipelineElement):
             pass
 
         runtime.update_functions(kept)
-        # Set the flag on the RUNTIME so continuations do not re-fire.
-        setattr(runtime, "_aspi_tool_filter_applied", True)
+        # Disarm: one-shot. Subsequent pipeline invocations on this
+        # runtime are no-ops until the runner explicitly re-arms.
+        setattr(runtime, "_aspi_tool_filter_armed", False)
         return query, runtime, env, messages, extra_args
 
 
