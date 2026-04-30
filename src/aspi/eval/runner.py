@@ -130,10 +130,20 @@ _DEFAULT_REASONING_KWARGS_BY_FAMILY: list[tuple[tuple[str, ...], dict]] = [
      {"extra_body": {"reasoning": {
          "effort": "medium", "summary": "detailed",
      }}}),
-    # Anthropic extended thinking (Claude 4.x, 3.7). Requires explicit
-    # enable — thinking is off by default on the API. Must be wrapped
-    # in extra_body because openai>=2.x strips unknown top-level
-    # kwargs before the call hits the LiteLLM proxy.
+    # Anthropic Opus 4.7+ uses the new "adaptive" thinking API
+    # (no explicit budget_tokens; effort-based control). Sending the
+    # 4.5/4.6-style {"type":"enabled","budget_tokens":N} 400s on
+    # 4.7+. This entry MUST come before the generic claude-opus-4 /
+    # claude-sonnet-4 entry below so more-specific matches win.
+    (("claude-opus-4-7", "claude-opus-4-8",
+      "anthropic/claude-opus-4-7", "anthropic/claude-opus-4-8"),
+     {"extra_body": {
+         "thinking": {"type": "adaptive"},
+     }}),
+    # Anthropic extended thinking for Claude 4.5 / 4.6 / 3.7. Requires
+    # explicit enable — thinking is off by default on the API. Must be
+    # wrapped in extra_body because openai>=2.x strips unknown
+    # top-level kwargs before the call hits the LiteLLM proxy.
     (("claude-4", "claude-opus-4", "claude-sonnet-4",
       "claude-3-7", "anthropic/claude-4",
       "anthropic/claude-opus-4", "anthropic/claude-sonnet-4"),
@@ -473,7 +483,9 @@ def _extract_block_text(block) -> tuple[str, bool]:
       - Standard:     {"type": "text", "content": "..."} or {"content": "..."}
     """
     if not isinstance(block, dict):
-        return str(block)[:2000], False
+        # Defensive cap on str(block) for unknown shapes — never fires
+        # on normal provider outputs but bounds runaway repr().
+        return str(block)[:16000], False
 
     btype = (block.get("type") or "").lower()
     is_thinking = False
@@ -542,7 +554,10 @@ def _serialize_messages(messages: list) -> list:
                     text_parts.append(text)
             entry["content"] = "\n".join(text_parts) if text_parts else ""
         else:
-            entry["content"] = str(content)[:2000]
+            # Defensive: content is some unknown type. str() it but
+            # bound to avoid runaway repr() output. Normal-shape
+            # content (str / list-of-blocks) never hits this branch.
+            entry["content"] = str(content)[:16000]
 
         # Forward reasoning fields already attached by the element.
         for f in REASONING_FIELDS:
@@ -575,7 +590,9 @@ def _serialize_messages(messages: list) -> list:
                 except (AttributeError, TypeError):
                     entry["tool_name"] = str(tc)[:100]
             if msg.get("error"):
-                entry["error"] = str(msg["error"])[:500]
+                # Defensive cap on error message — protects against
+                # provider stack traces that can be arbitrarily long.
+                entry["error"] = str(msg["error"])[:8000]
         result.append(entry)
     return result
 
@@ -772,7 +789,7 @@ def build_clarif_tool_state_via_replay(
                 f"({user_task.ID}): {e}"
             )
             msg["content"] = [text_content_block_from_string("")]
-            msg["error"] = f"Replay error: {e}"[:500]
+            msg["error"] = f"Replay error: {e}"[:8000]
 
     return {
         **state,
@@ -968,10 +985,10 @@ def continue_from_ask_user_tool_return(
         "utility": utility,
         "security": security,
         "skipped": False,
-        "model_output": output_text[:2000],
+        "model_output": output_text,
         "turn2_response": state.get("turn2_text", ""),
         "agent_question": state.get("agent_question") or "",
-        "tool_result_content": new_tool_content[:2000],
+        "tool_result_content": new_tool_content,
         "tool_calls": _format_tool_calls(all_traces),
         "n_tool_calls": len(all_traces),
         "full_conversation": _serialize_messages(messages),
@@ -1061,10 +1078,10 @@ def continue_from_injected_user_reply(
         "utility": utility,
         "security": security,
         "skipped": False,
-        "model_output": output_text[:2000],
+        "model_output": output_text,
         "turn2_response": state.get("turn2_text", ""),
         "agent_question": state.get("agent_question") or "",
-        "injected_user_reply": injected_text[:2000],
+        "injected_user_reply": injected_text,
         "tool_calls": _format_tool_calls(all_traces),
         "n_tool_calls": len(all_traces),
         "full_conversation": _serialize_messages(messages),
@@ -1153,7 +1170,7 @@ def run_single_turn_eval(
     return {
         "utility": utility,
         "security": security,
-        "model_output": output_text[:2000],
+        "model_output": output_text,
         "tool_calls": _format_tool_calls(traces),
         "n_tool_calls": len(traces),
         "query": query,
@@ -1275,8 +1292,8 @@ def run_two_turn_eval(
         "utility": utility,
         "security": security,
         "utility_turn1": utility,  # explicit alias for clarity in downstream analysis
-        "model_output": final_text[:2000],
-        "model_output_turn1": turn1_text[:2000],
+        "model_output": final_text,
+        "model_output_turn1": turn1_text,
         "turn1_query": turn1_query,
         "turn2_text": turn2_text,
         "tool_calls": _format_tool_calls(all_traces),
@@ -1608,7 +1625,7 @@ def evaluate_group(
             trusted_task=query,
         )
         r["condition"] = "exec_user"
-        r["appended_attack"] = g[:500]
+        r["appended_attack"] = g  # full attacker_goal text
         return r
 
     def _run_exec_next_turn():
@@ -1724,7 +1741,7 @@ def evaluate_group(
         r["condition"] = "clarif_ask_user"
         r["benign_response"] = benign_response
         r["benign_source"] = benign_source
-        r["injection_text_preview"] = W[:500]
+        r["injection_text_preview"] = W  # full wrapped attack text (despite name)
         return r
 
     def _run_clarif_tool():
@@ -1759,7 +1776,7 @@ def evaluate_group(
         )
         r["condition"] = f"clarif_user_{op}"
         r["operator"] = op
-        r["injected_text_preview"] = h_op[:500]
+        r["injected_text_preview"] = h_op  # full operator-framed reply (despite name)
         return r
 
     # Submit all Phase-2 branches in parallel
