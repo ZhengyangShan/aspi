@@ -89,22 +89,55 @@ _NATIVE_PROVIDER_PREFIXES = (
 def _coerce_model_for_proxy(model: str) -> str:
     """Rewrite a model string for LiteLLM-proxy routing.
 
-    - ``openai/...`` and ``openai/responses/...`` pass through unchanged
-      (already OpenAI-compat from the SDK's point of view).
-    - A native-provider prefix (``anthropic/``, ``gemini/``, ...) is
-      stripped and replaced with ``openai/`` so the call lands on the
-      proxy's ``/chat/completions`` endpoint.
-    - Bare names without a slash get ``openai/`` prepended.
+    Treats ``openai/`` as a *transport* prefix (LiteLLM SDK telling
+    itself "talk OpenAI-compatible to the proxy"), and otherwise
+    PRESERVES the upstream provider group as the proxy expects it.
+    The proxy's catalog uses the full provider-prefixed handles
+    (``anthropic/claude-opus-4-7``, ``fireworks_ai/kimi-k2p5``,
+    ``bedrock/eu.deepseek.v3.2``, ...), so stripping the prefix
+    produced names the proxy did not serve — that path returned 200
+    with empty / malformed content for some routes (notably
+    ``openai/o4-mini`` after we'd stripped a different prefix).
+
+    Rules:
+    - Pass through ``openai/responses/...`` unchanged (Responses API
+      bridge already has both transport and route in the right shape).
+    - Pass through ``openai/...`` unchanged (already OpenAI-routed).
+    - For other provider prefixes that the proxy serves verbatim
+      (``anthropic/``, ``fireworks_ai/``, ``bedrock/``,
+      ``mistral/``, ``xai/``, ``openrouter/``), prepend ``openai/`` as
+      the SDK transport prefix WITHOUT stripping the provider group.
+    - For ``gemini/``, keep the historical strip behavior — the
+      proxy was confirmed to serve gemini handles under the
+      stripped form.
+    - Bare names get ``openai/`` prepended.
     """
     if not model:
         return model
+
+    # Already routed via OpenAI Responses bridge — leave alone.
+    if model.startswith("openai/responses/"):
+        return model
+    # Already openai/<...> — leave alone.
     if model.startswith("openai/"):
         return model
-    for prefix in _NATIVE_PROVIDER_PREFIXES:
+
+    # Providers the proxy serves with their full prefix preserved.
+    PRESERVE = ("anthropic/", "fireworks_ai/", "bedrock/",
+                "mistral/", "xai/", "openrouter/")
+    for prefix in PRESERVE:
         if model.startswith(prefix):
-            return f"openai/{model[len(prefix):]}"
+            return f"openai/{model}"
+
+    # Gemini: historical strip-and-prepend works on the proxy.
+    if model.startswith("gemini/"):
+        return f"openai/{model.split('/', 1)[1]}"
+
+    # Bare name → prepend openai transport prefix.
     if "/" not in model:
         return f"openai/{model}"
+
+    # Unrecognised slashed handle: leave as-is.
     return model
 
 
