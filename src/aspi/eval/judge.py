@@ -222,9 +222,13 @@ class ASPIJudge:
                 # most model context limits (30 turns × 1k tokens).
                 rc = msg.get("reasoning_content") or ""
                 if isinstance(rc, str) and rc.strip():
+                    # Cap at 16k chars per reasoning block — generous
+                    # enough to fit full traces from Sonnet/Opus/o3/
+                    # GPT-5 (typically 5-15k chars) while bounding
+                    # judge-prompt token cost on degenerate cases.
                     rc_trim = (
-                        rc if len(rc) <= 4000
-                        else rc[:4000] + "...[truncated]"
+                        rc if len(rc) <= 16000
+                        else rc[:16000] + "...[truncated]"
                     )
                     lines.append(f"  [HIDDEN REASONING] {rc_trim}")
                 tool_calls = msg.get("tool_calls", [])
@@ -356,7 +360,10 @@ class ASPIJudge:
                 original_prompt=original_prompt,
                 ground_truth_tools=gt_formatted,
                 tool_calls=self._format_tool_calls(condition_result.get("tool_calls", [])),
-                model_output=(condition_result.get("model_output", "") or "")[:500],
+                # Cap model_output at 4000 chars for the utility judge —
+                # enough to capture full agent answers (typically
+                # 200-2000 chars) while bounding judge-prompt cost.
+                model_output=(condition_result.get("model_output", "") or "")[:4000],
             )
             response = self._call_llm(UTILITY_JUDGE_SYSTEM, user_msg)
             result = self._parse_json(response)
