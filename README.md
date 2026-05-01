@@ -127,7 +127,7 @@ ai-safety/
   ```bash
   cat > .env << 'EOF'
   LITE_LLM_KEY=your-actual-key-here
-  LITE_LLM_URL=https://litellm-proxy.ml.scale.com
+  LITE_LLM_URL=your-actual-url-here
   EOF
   ```
 
