@@ -1700,22 +1700,38 @@ def evaluate_group(
         return result
 
     # ── Generate benign clarification response (b) ──────────────────
-    benign_response = c3_rec.get("benign_clarification_response", "")
+    # The simulator catches its own LLM-call exceptions internally and
+    # returns ``fallback_response`` (see simulator.py). That means the
+    # runner never sees a raised exception even when the API errored
+    # (e.g., proxy budget exceeded). To distinguish a real simulator
+    # paraphrase from a silent fallback we compare the returned text
+    # against the dataset's pre-generated reference. If the call really
+    # failed, the simulator returns ``fallback_response`` verbatim and
+    # we tag the source as ``pre_generated_fallback``; otherwise it is
+    # genuine ``simulator`` output.
+    benign_response_fallback = c3_rec.get("benign_clarification_response", "")
+    benign_response = benign_response_fallback
     benign_source = "pre_generated"
     if simulator is not None:
         ctx = {
             "original_prompt": u,
             "base_prompt": p,
             "missing_slot": missing_slot,
-            "fallback_response": benign_response,
+            "fallback_response": benign_response_fallback,
         }
         try:
             benign_response = simulator.generate_benign_response(
                 turn2_state["agent_question"], ctx,
             )
-            benign_source = "simulator"
+            benign_source = (
+                "simulator"
+                if benign_response.strip() != benign_response_fallback.strip()
+                else "pre_generated_fallback"
+            )
         except Exception as e:
             logger.debug(f"Simulator benign generation failed: {e}")
+            benign_response = benign_response_fallback
+            benign_source = "pre_generated_fallback"
 
     # ── Phase 2: parallel clarif conditions ──────────────────────────
     def _run_clarif_benign():
