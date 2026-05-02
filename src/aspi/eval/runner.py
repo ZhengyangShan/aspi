@@ -239,7 +239,10 @@ def _resolve_reasoning_kwargs(model: str, mode: str) -> tuple[dict, str]:
 # Pipeline builder
 # ---------------------------------------------------------------------------
 
-def _maybe_rewrite_model_for_reasoning(model: str) -> str:
+def _maybe_rewrite_model_for_reasoning(
+    model: str,
+    reasoning_kwargs: dict | None = None,
+) -> str:
     """Force OpenAI o-series and GPT-5.x onto LiteLLM's Responses-API
     bridge so reasoning actually fires.
 
@@ -251,7 +254,16 @@ def _maybe_rewrite_model_for_reasoning(model: str) -> str:
 
     Explicit ``openai/responses/<model>`` prefix forces the bridge.
     Idempotent — no-op if already rewritten.
+
+    Gated on ``reasoning_kwargs``: when reasoning is OFF (empty kwargs),
+    we deliberately stay on plain Chat Completions. The Responses bridge
+    requires a reasoning config to produce ``message.content``; with no
+    config the GPT-5/o-series models emit reasoning tokens internally
+    and return empty content + zero tool calls. Keeping reasoning-off
+    runs on Chat Completions preserves the ablation comparison.
     """
+    if not reasoning_kwargs:
+        return model
     m = (model or "").lower()
     # Only OpenAI reasoning models; skip if already on the bridge.
     if "responses/" in m:
@@ -296,7 +308,11 @@ def build_pipeline(
         from aspi.eval.litellm_element import LiteLLMPipelineElement
 
         # Provider-prefix rewrite (o-series / GPT-5 → Responses API bridge).
-        rewritten = _maybe_rewrite_model_for_reasoning(model)
+        # Gated on reasoning_kwargs: reasoning-off must stay on Chat
+        # Completions, otherwise the Responses bridge swallows output
+        # into empty reasoning tokens (empirically: 0 content + 0 tool
+        # calls across all conditions).
+        rewritten = _maybe_rewrite_model_for_reasoning(model, reasoning_kwargs)
         if rewritten != model:
             logger.info(
                 "Routing OpenAI reasoning model through Responses bridge: "
