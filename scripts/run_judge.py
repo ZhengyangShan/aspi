@@ -42,6 +42,16 @@ def main():
         "--workers", type=int, default=4,
         help="Number of parallel judge threads (default: 4)",
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help=(
+            "If output already exists, skip groups that already have a "
+            "'judge' field (matched by suite/user_task_id/injection_task_id). "
+            "Rows with truncation/UNCLEAR judges still count as judged — "
+            "delete the corrupted output before resuming if you need to "
+            "re-judge."
+        ),
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -68,12 +78,15 @@ def main():
     print(f"Workers: {args.workers}")
     if args.limit:
         print(f"Limit:   {args.limit}")
+    if args.resume:
+        print(f"Resume:  enabled")
     print()
 
     judge = ASPIJudge(model=args.model, backend=args.backend)
     judge.run_judge_pass(
         str(input_path), output_path,
         limit=args.limit, workers=args.workers,
+        resume=args.resume,
     )
 
 
