@@ -60,6 +60,7 @@ import os
 import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import openai
 from tenacity import retry, stop_after_attempt, wait_random_exponential
@@ -144,15 +145,79 @@ class ASPIJudge:
         reraise=True,
     )
     def _call_llm(self, system_msg: str, user_msg: str) -> str:
-        resp = self.client.chat.completions.create(
-            model=self.model,
+        # Per-judge-model dispatch:
+        #   - Reasoning-class judges (Gemini 2.5/3, GPT-5.x, o-series) burn
+        #     output budget on internal thinking and truncate the JSON. The
+        #     attack-judge schema (10 fields incl. action_answer_alignment,
+        #     post_clarif_focus, evidence) is ~400-600 tokens; with reasoning
+        #     active and max_tokens=300 we observed 86.5% truncated UNCLEAR
+        #     parses on gemini-3.1-pro-preview. The judge does not need to
+        #     reason — it follows a rubric — so we minimise the reasoning
+        #     budget where the API allows and raise the output budget so
+        #     thinking + JSON both fit comfortably.
+        #
+        # Gemini quirks:
+        #   - Gemini 2.5: thinkingBudget=0 disables thinking entirely.
+        #   - Gemini 3.x: thinkingBudget=0 is REJECTED with HTTP 400
+        #     ("Budget 0 is invalid. This model only works in thinking
+        #     mode."). Smallest accepted budget is 128 — use that to
+        #     keep thinking minimal but compliant.
+        #
+        # OpenAI quirks (gpt-5.x, o-series):
+        #   - The 'reasoning' parameter is rejected on Chat Completions
+        #     ("Unknown parameter: 'reasoning'", HTTP 400). LiteLLM's
+        #     auto-route to Responses only fires when BOTH reasoning_effort
+        #     AND tools are present; the judge sends no tools, so the
+        #     auto-route never triggers. Force the Responses bridge here
+        #     by rewriting the model to ``openai/responses/<tail>`` —
+        #     mirrors ``_maybe_rewrite_model_for_reasoning`` in runner.py.
+        #   - The reasoning.effort enum drifts across model versions:
+        #       gpt-5     accepts 'minimal','low','medium','high'
+        #       gpt-5.4+  accepts 'none','low','medium','high','xhigh'
+        #                 (REJECTS 'minimal' with HTTP 400)
+        #       o1/o3/o4  accept 'low','medium','high'
+        #     'low' is the only value common to all four — use it for
+        #     minimal-but-portable reasoning across the whole family.
+        #   - The 'temperature' parameter is REJECTED entirely on the
+        #     Responses bridge ("Unsupported parameter: 'temperature'
+        #     is not supported with this model"). These reasoning models
+        #     run at a fixed internal temperature; we must omit the
+        #     parameter rather than send 0.0. Determinism still holds
+        #     (these models are deterministic at fixed effort).
+        extra: dict = {}
+        call_model = self.model
+        m_l = self.model.lower()
+        is_openai_reasoning = False
+        if "gemini-3" in m_l:
+            extra["extra_body"] = {"thinkingConfig": {"thinkingBudget": 128}}
+        elif "gemini-2.5" in m_l:
+            extra["extra_body"] = {"thinkingConfig": {"thinkingBudget": 0}}
+        elif m_l.startswith(("openai/gpt-5", "openai/o1", "openai/o3", "openai/o4")):
+            extra["extra_body"] = {"reasoning": {"effort": "low"}}
+            # Force Responses bridge so the reasoning param is accepted.
+            if not m_l.startswith("openai/responses/"):
+                tail = self.model.split("/", 1)[1]
+                call_model = f"openai/responses/{tail}"
+            is_openai_reasoning = True
+
+        # max_tokens needs to cover BOTH thinking and visible output for
+        # Gemini (Gemini's maxOutputTokens includes thinking tokens). With
+        # thinkingBudget=128 + worst-case ~700-token JSON, 4096 is
+        # comfortable; non-reasoning models stay well under this ceiling.
+        call_kwargs = dict(
+            model=call_model,
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
             ],
-            max_tokens=300,
-            temperature=0.0,
+            max_tokens=4096,
+            **extra,
         )
+        # Only set temperature for models that accept it — OpenAI
+        # reasoning models (gpt-5/o-series via Responses) reject it.
+        if not is_openai_reasoning:
+            call_kwargs["temperature"] = 0.0
+        resp = self.client.chat.completions.create(**call_kwargs)
         return resp.choices[0].message.content or ""
 
     def _parse_json(self, text: str) -> dict:
@@ -639,6 +704,7 @@ class ASPIJudge:
         output_path: str,
         limit: int = 0,
         workers: int = 4,
+        resume: bool = False,
     ):
         """Batch judge: read results JSONL, annotate with judge output, write new JSONL.
 
@@ -651,6 +717,15 @@ class ASPIJudge:
             output_path: path to write annotated JSONL
             limit: max groups to judge (0 = all)
             workers: number of parallel judge threads (default: 4)
+            resume: if True and output_path already exists, load any rows
+                    that already carry a "judge" field and skip re-judging
+                    them. The output is rewritten in full (already-judged
+                    rows pass through untouched, new rows are appended as
+                    they finish). Group identity is the (suite,
+                    user_task_id, injection_task_id) triple — matches the
+                    eval runner's group key. Rows with truncation/UNCLEAR
+                    judges still count as "judged" — delete the corrupted
+                    output file before resuming if you need to re-judge.
         """
         results = []
         with open(input_path) as f:
@@ -661,11 +736,60 @@ class ASPIJudge:
         if limit > 0:
             results = results[:limit]
 
+        # If resuming, overlay any already-computed judge fields from the
+        # existing output file onto matching input rows (by group key).
+        # The downstream partition then automatically routes them to the
+        # already_judged list and skips re-judging.
+        resumed = 0
+        if resume and Path(output_path).exists():
+            existing: dict[tuple, dict] = {}
+            try:
+                with open(output_path) as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        try:
+                            r = json.loads(line)
+                        except Exception:
+                            continue
+                        if "judge" not in r:
+                            continue
+                        key = (
+                            r.get("suite"),
+                            r.get("user_task_id"),
+                            r.get("injection_task_id"),
+                        )
+                        existing[key] = r["judge"]
+            except Exception as e:
+                warnings.warn(f"Resume read failed for {output_path}: {e}")
+                existing = {}
+
+            for r in results:
+                if "judge" in r:
+                    continue
+                key = (
+                    r.get("suite"),
+                    r.get("user_task_id"),
+                    r.get("injection_task_id"),
+                )
+                if key in existing:
+                    r["judge"] = existing[key]
+                    resumed += 1
+            print(
+                f"Resume: loaded {resumed}/{len(results)} already-judged "
+                f"groups from {output_path}"
+            )
+
         print(f"Judging {len(results)} groups with {self.model} ({workers} workers)...")
 
         # Partition: already-judged groups pass through; unjudged go to the pool
         already_judged = [r for r in results if "judge" in r]
         pending = [r for r in results if "judge" not in r]
+        if resume:
+            print(
+                f"  passing through {len(already_judged)} already-judged, "
+                f"queueing {len(pending)} for judging"
+            )
 
         write_lock = threading.Lock()
 
