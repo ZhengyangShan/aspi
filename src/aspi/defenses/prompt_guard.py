@@ -32,10 +32,30 @@ Default classifier: ``protectai/deberta-v3-base-prompt-injection-v2``
 Meta's ``meta-llama/Llama-Prompt-Guard-2-86M`` is gated — requires HF
 auth with Meta approval.
 
-Failure mode: if the classifier fails to load (gated model without
-auth, network, disk), the defense becomes a no-op (logs an error) so
-the eval continues with baseline behavior rather than crashing every
-group.
+Failure modes (post-May-2026 hardening):
+
+1. **Classifier load failure** (gated model without auth, network down,
+   missing dep, no disk space) — raises ``RuntimeError`` on the very
+   first call AND every subsequent call. Previously this silently
+   degraded to a no-op; that produced 728 rows × 8 conditions of audit
+   data with ``loaded=False, load_failed=True`` on every call,
+   passing structural checks while the defense did nothing. Hard
+   failure now forces the operator to fix the cache / network / deps.
+
+2. **Inference failure within tolerance** — caught and logged; the
+   chunk is treated as non-flag (defense fails open for that chunk).
+   Counted in ``classify_failures`` and stamped into the audit so
+   post-hoc analysis can grep affected runs.
+
+3. **Inference failure beyond tolerance** — once ``classify_failures``
+   exceeds ``classify_fail_max`` (default 50) OR (after
+   ``classify_fail_warmup``=30 calls) the failure rate exceeds
+   ``classify_fail_rate`` (default 10%), the run aborts via
+   ``RuntimeError``. Catches systemic regressions (corrupt weights,
+   GPU lost mid-run) without killing on the first transient outlier.
+
+A successful first load prints the sentinel ``PROMPT_GUARD_CLASSIFIER_LOADED``
+to stdout for log-grep-based smoke testing.
 
 References
 ----------
@@ -100,6 +120,9 @@ class ASPIPromptGuard(BasePipelineElement):
         max_input_chars: int = 8000,
         scan_first_user: bool = True,
         split_on_blank_lines: bool = True,
+        classify_fail_max: int = 50,
+        classify_fail_rate: float = 0.10,
+        classify_fail_warmup: int = 30,
     ) -> None:
         self.model_id = model_id
         self.threshold = threshold
@@ -111,6 +134,19 @@ class ASPIPromptGuard(BasePipelineElement):
         self._torch: Any = None
         self._load_failed: bool = False
         self._init_lock = threading.Lock()
+        # Inference-failure tracking + thresholded hard-abort.
+        # Distinct from load failure (which aborts on first occurrence):
+        # transient inference failures on outlier inputs (oversized
+        # tokens, OOM on a single chunk) shouldn't kill a 728-row run,
+        # but a sustained failure rate indicates a systemic problem
+        # hiding behind audit data that says "defense was active."
+        # Defaults: tolerate up to 50 absolute failures or 10% rate
+        # after a 30-call warm-up. Any of these exceeded -> abort.
+        self._classify_calls: int = 0
+        self._classify_failures: int = 0
+        self.classify_fail_max: int = classify_fail_max
+        self.classify_fail_rate: float = classify_fail_rate
+        self.classify_fail_warmup: int = classify_fail_warmup
 
     # ------------------------------------------------------------------
     # Classifier loading / inference
@@ -119,17 +155,47 @@ class ASPIPromptGuard(BasePipelineElement):
     def _lazy_load(self) -> None:
         """Load the classifier on first use. Thread-safe.
 
-        On load failure (gated model w/o auth, network, disk space) sets
-        ``self._load_failed = True`` and returns without raising.
-        Subsequent ``_classify`` calls see the flag and return False (no
-        filtering), so the eval continues as an effective no-op rather
-        than crashing every group.
+        Behaviour change (post-Gemini-3 prompt-guard incident, May 2026):
+        on load failure we now ABORT the run with a clear ``RuntimeError``
+        instead of silently degrading to a no-op. A previous Gemini-3
+        sweep wrote 728 rows × 8 conditions of audit data with
+        ``loaded=False, load_failed=True`` on every call — the defense
+        was effectively disabled but the runner reported success. Hard
+        failure here forces the operator to fix the cache / network /
+        deps before burning more wall-clock on a no-op defense.
+
+        Subsequent calls after a load failure ALSO raise (not just the
+        first one). If a runner caller wraps the first call in
+        ``try/except`` and continues, the next call must still abort —
+        otherwise the eval drifts back into silent-no-op territory.
+
+        ``transformers.AutoTokenizer.from_pretrained`` and friends are
+        cache-aware: if the model_id is already in
+        ``~/.cache/huggingface/hub`` the call resolves locally and never
+        touches the network. Repeat callers (i.e. every group in the
+        eval) hit the in-process cache via the ``self._model is not
+        None`` short-circuit and never re-download.
         """
-        if self._model is not None or self._load_failed:
+        if self._model is not None:
             return
+        if self._load_failed:
+            # Re-raise on every subsequent call, not just the first, so
+            # a runner that swallowed the initial RuntimeError and kept
+            # going still gets aborted on the next call instead of
+            # silently producing audit-passing-but-broken rows.
+            raise RuntimeError(
+                f"ASPI prompt-guard classifier previously failed to "
+                f"load ({self.model_id}); refusing to proceed. Restart "
+                f"the run after fixing the cache / network / deps."
+            )
         with self._init_lock:
-            if self._model is not None or self._load_failed:
+            if self._model is not None:
                 return
+            if self._load_failed:
+                raise RuntimeError(
+                    f"ASPI prompt-guard classifier previously failed to "
+                    f"load ({self.model_id}); refusing to proceed."
+                )
             try:
                 import torch  # deferred import
                 from transformers import (
@@ -151,27 +217,65 @@ class ASPIPromptGuard(BasePipelineElement):
                     self.model_id,
                     getattr(self._model.config, "id2label", "?"),
                 )
+                # Sentinel string for log greppers / monitor scripts —
+                # easy to confirm the classifier actually loaded before
+                # the run produces hours of data.
+                print("PROMPT_GUARD_CLASSIFIER_LOADED", flush=True)
             except Exception as exc:
-                # Do NOT re-raise — a failed load would crash every group.
+                # Hard fail: silent degradation previously cost a whole
+                # 728-row eval run that we then had to discard.
+                self._load_failed = True
                 logger.error(
                     "ASPI prompt-guard classifier FAILED to load (%s). "
-                    "Defense will be effectively disabled for this run. "
-                    "Error: %s",
+                    "Aborting run. Fix one of: (a) HuggingFace cache "
+                    "(pre-download on a login node, set HF_HUB_OFFLINE=1), "
+                    "(b) missing dep (transformers / torch / sentencepiece), "
+                    "(c) GPU/CUDA visibility. Error: %s",
                     self.model_id, str(exc)[:500],
                 )
-                self._load_failed = True
+                raise RuntimeError(
+                    f"ASPI prompt-guard classifier failed to load "
+                    f"({self.model_id}): {exc}"
+                ) from exc
 
     def _classify(self, text: str) -> bool:
         """Return True if ``text`` is classified as a prompt injection.
 
-        Returns False if the classifier failed to load — makes the
-        defense a no-op but keeps the eval running for baseline numbers.
+        Failure handling has three regimes:
+
+        1. **Load failure** — ``_lazy_load`` raises ``RuntimeError`` on
+           the first call AND every subsequent call (see ``_lazy_load``)
+           so the run aborts loudly even if a caller swallowed the
+           initial exception.
+        2. **Inference failure within tolerance** — caught here, the
+           chunk is treated as non-flag (defense fails open for that
+           chunk) but the failure is counted in ``_classify_failures``
+           and stamped into the audit. Outlier inputs that crash the
+           tokenizer or trigger OOM are common enough that aborting on
+           first occurrence would discard hours of work.
+        3. **Inference failure beyond tolerance** — once
+           ``_classify_failures`` exceeds ``classify_fail_max`` OR
+           (after ``classify_fail_warmup`` calls) the failure rate
+           exceeds ``classify_fail_rate``, the run aborts via
+           ``RuntimeError``. Catches systemic failures (corrupt
+           weights, missing tokenizer file, GPU lost mid-run) before
+           they corrupt a whole sweep with audit-passing-but-broken
+           rows.
         """
         if not text or not text.strip():
             return False
-        self._lazy_load()
-        if self._load_failed or self._model is None:
-            return False
+        self._lazy_load()  # raises on load failure (now and every later call)
+        # ``_lazy_load`` guarantees ``self._model is not None`` past this
+        # point on success. The defensive check below is kept only to
+        # surface a clear error if some future code path bypasses
+        # ``_lazy_load``; it should never fire in normal operation.
+        if self._model is None:
+            raise RuntimeError(
+                "ASPI prompt-guard: classifier model is None after "
+                "_lazy_load returned without raising. This indicates "
+                "an unexpected code path; refusing to silently degrade."
+            )
+        self._classify_calls += 1
         try:
             trunc = text[: self.max_input_chars]
             inputs = self._tokenizer(
@@ -189,10 +293,39 @@ class ASPIPromptGuard(BasePipelineElement):
             # uniformly.
             injection_prob = float(probs[0, 1:].sum().item())
         except Exception as exc:
+            self._classify_failures += 1
             logger.warning(
-                "ASPI prompt-guard classification failed (%s); treating "
-                "as non-flag.", exc,
+                "ASPI prompt-guard classification call %d FAILED (%s); "
+                "treating chunk as non-flag. Cumulative: %d/%d failures.",
+                self._classify_calls, exc,
+                self._classify_failures, self._classify_calls,
             )
+            # Threshold-based hard abort: prevents systemic failure from
+            # producing audit-passing-but-broken rows for a full sweep.
+            rate_breach = (
+                self._classify_calls >= self.classify_fail_warmup
+                and self._classify_failures / self._classify_calls
+                    > self.classify_fail_rate
+            )
+            count_breach = self._classify_failures >= self.classify_fail_max
+            if rate_breach or count_breach:
+                trigger = "rate" if rate_breach else "count"
+                logger.error(
+                    "ASPI prompt-guard inference-failure threshold "
+                    "exceeded (%s): %d/%d failures (max=%d, rate>%.0f%% "
+                    "after warmup=%d). Aborting run.",
+                    trigger, self._classify_failures, self._classify_calls,
+                    self.classify_fail_max, self.classify_fail_rate * 100,
+                    self.classify_fail_warmup,
+                )
+                raise RuntimeError(
+                    f"ASPI prompt-guard inference failures exceeded "
+                    f"threshold ({self._classify_failures}/"
+                    f"{self._classify_calls}, trigger={trigger}). "
+                    f"Likely cause: tokenizer/OOM on outlier inputs, "
+                    f"corrupt model weights, or GPU lost mid-run. "
+                    f"Investigate before relaunching."
+                ) from exc
             return False
         return injection_prob > self.threshold
 
@@ -343,6 +476,9 @@ class ASPIPromptGuard(BasePipelineElement):
         # Accumulate across every pipeline call on this runtime. The
         # runner copies the snapshot onto each result dict so we can
         # grep after the fact whether the classifier loaded and fired.
+        # ``classify_calls`` / ``classify_failures`` reflect the
+        # cumulative counters since defense init — a healthy run has
+        # ``classify_failures: 0`` as proof of clean inference.
         try:
             prev = getattr(runtime, "_aspi_prompt_guard_audit", None) or {
                 "model_id": self.model_id,
@@ -353,6 +489,11 @@ class ASPIPromptGuard(BasePipelineElement):
                 "filtered_tool_total": 0,
                 "scan_first_user": self.scan_first_user,
                 "threshold": self.threshold,
+                "classify_calls": 0,
+                "classify_failures": 0,
+                "classify_fail_max": self.classify_fail_max,
+                "classify_fail_rate": self.classify_fail_rate,
+                "classify_fail_warmup": self.classify_fail_warmup,
             }
             prev["loaded"] = not self._load_failed and self._model is not None
             prev["load_failed"] = self._load_failed
@@ -363,6 +504,8 @@ class ASPIPromptGuard(BasePipelineElement):
             prev["filtered_tool_total"] = (
                 int(prev.get("filtered_tool_total", 0)) + filtered_tool
             )
+            prev["classify_calls"] = self._classify_calls
+            prev["classify_failures"] = self._classify_failures
             setattr(runtime, "_aspi_prompt_guard_audit", prev)
         except (AttributeError, TypeError):
             pass
