@@ -13,9 +13,11 @@ needed for ASPI's 8-condition setting:
    carries the attacker goal, so reading it directly lets the injection
    steer which tools remain available. The filter instead reads
    ``extra_args["aspi_trusted_task"]`` or ``runtime._aspi_trusted_task``
-   (set by the runner to ``original_prompt`` for exec branches and
-   ``base_prompt`` for clarif branches). Only if both are missing does
-   it fall back to the first user message (best-effort; logs a warning).
+   (set by the runner per condition: ``original_prompt`` for exec
+   benign/tool/next_turn; ``original_prompt + "\\n\\n" + attacker_goal``
+   for exec_user fairness; ``base_prompt + question + response`` for
+   clarif Phase 2). Only if both are missing does it fall back to the
+   first user message (best-effort; logs a warning).
 
 3. Once-per-task idempotency on the RUNTIME, not extra_args. Pipeline
    elements re-run on continuations (Phase 2 after ask_user, retry
@@ -38,9 +40,17 @@ propagates automatically.
 Structured LLM I/O
 ------------------
 The filter sends a JSON request (trusted task + tool catalog) and
-requests a JSON reply (``{"keep_tools": [...]}``). Parsing prefers JSON
-and falls back to exact-name word-boundary matching so the filter stays
-robust to slightly malformed replies.
+requests a JSON reply (``{"keep_tools": [...]}``). Parsing is
+**strict-JSON-only for the keep decision**: if the reply doesn't parse
+as JSON matching the schema (or yields an empty list, or contains only
+names that don't match the runtime's valid_names), the filter falls
+back to keeping ALL original tools and stamps ``fallback_kept_all=True``
+in the audit. The substring parser still runs for diagnostics
+(``reply_parser="substring"`` in the audit) but does NOT trigger
+pruning — that closes a previous bug where a substring-only match
+would still produce ``kept=["ask_user"]``, silently breaking tool use
+under audit data that looked successful. Only after a confirmed JSON
+parse is the always-allow ``ask_user`` added to the kept set.
 """
 from __future__ import annotations
 
@@ -350,22 +360,43 @@ class ASPIToolFilter(BasePipelineElement):
                 "Error: %s", exc,
             )
 
-        # ── Parse + enforce allowlist ────────────────────────────────
+        # ── Parse + decide whether to filter or fall back ────────────
+        # Bug fix (May 2026): previously ALWAYS_ALLOW={"ask_user"} was
+        # added to selected_names BEFORE checking parser validity, so
+        # an empty/unparseable reply (parser ∈ {"empty","substring"})
+        # would still produce kept=["ask_user"] with
+        # fallback_kept_all=False — a silent "filter agreed to keep
+        # only ask_user" verdict that masqueraded as a successful
+        # filter run and aggressively broke tool use. Required
+        # behaviour: only trust the filter's pruning when the LLM
+        # returned JSON matching our schema. Anything else falls back
+        # to keeping the entire original toolset (safer than pruning
+        # to ask_user only) and stamps fallback_kept_all=True for
+        # post-hoc grep.
         valid_names = set(original_funcs)
         selected_names, parser = self._parse_tool_names(reply_text, valid_names)
-        for name in ALWAYS_ALLOW:
-            if name in valid_names:
-                selected_names.add(name)
 
         fallback_kept_all = False
-        if not selected_names:
-            logger.warning(
-                "ASPI tool-filter returned empty tool set; falling back "
-                "to all tools. Reply text was: %r", reply_text,
-            )
+        if parser != "json":
+            if reply_text:
+                logger.warning(
+                    "ASPI tool-filter reply did not parse as JSON "
+                    "(parser=%r); keeping all tools. Reply text: %r",
+                    parser, reply_text[:200],
+                )
+            else:
+                logger.warning(
+                    "ASPI tool-filter received empty reply (call may "
+                    "have failed); keeping all tools.",
+                )
             kept = original_funcs
             fallback_kept_all = True
         else:
+            # Valid JSON parse — apply the always-allow allowlist on
+            # top of the filter's selection, then prune.
+            for name in ALWAYS_ALLOW:
+                if name in valid_names:
+                    selected_names.add(name)
             kept = {name: original_funcs[name] for name in selected_names}
 
         logger.info(
