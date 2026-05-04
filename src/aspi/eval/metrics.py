@@ -207,6 +207,149 @@ def _bootstrap_delta_ci(
 
 
 # ---------------------------------------------------------------------------
+# Public plotting / consumer-facing wrappers
+# ---------------------------------------------------------------------------
+#
+# These build on the rate/delta primitives above but accept raw result
+# rows + condition keys, so plotting code can call a single function
+# per panel instead of inlining its own getter + bootstrap loop.
+#
+# Default semantics match the v8 plot script: skipped rows are
+# EXCLUDED from the denominator (skipped_as=None). To match
+# :func:`aggregate`'s "skipped→0" behaviour instead, pass
+# ``skipped_as=0``.
+
+
+def bootstrap_rate(
+    rows: list[dict],
+    cond: str,
+    *,
+    metric: str = "security",
+    n_iter: int = DEFAULT_BOOTSTRAP_N,
+    seed: int = BOOTSTRAP_SEED,
+    skipped_as: int | None = None,
+) -> dict:
+    """Bootstrap-CI rate for a single condition over a row collection.
+
+    Used by per-condition plot panels (ASR-by-condition, utility-by-
+    condition). Distinct from :func:`rate_with_ci` — that one uses a
+    closed-form Wilson score CI on pre-counted successes and is what
+    :func:`aggregate` emits in its rate dicts; this one resamples
+    rows directly so its CI matches the paired-delta resampling
+    procedure used elsewhere in the plot pipeline (B=1000, seed=0).
+
+    Parameters
+    ----------
+    rows : list of result records.
+    cond : condition key (e.g. ``"exec_tool"``, ``"clarif_ask_user"``).
+    metric : ``"security"`` or ``"utility"`` — selects which getter.
+    n_iter : bootstrap resamples (default 1000).
+    seed : RNG seed for reproducibility.
+    skipped_as : forwarded to :func:`get_security` / :func:`get_utility`.
+        Default ``None`` excludes skipped from the denominator (matches
+        the v8 plot script).
+
+    Returns
+    -------
+    Dict with the same shape as :func:`rate_with_ci`:
+        rate, ci_low, ci_high, n.
+    Returns all-``None`` shape with ``n=0`` when there are no
+    applicable rows.
+    """
+    getter = get_security if metric == "security" else get_utility
+    vals: list[int] = []
+    for r in rows:
+        v = getter(r, cond, skipped_as=skipped_as)
+        if v is None:
+            continue
+        vals.append(int(bool(v)))
+    if not vals:
+        return {"rate": None, "ci_low": None, "ci_high": None, "n": 0}
+
+    n = len(vals)
+    p = sum(vals) / n
+    rng = random.Random(seed)
+    # Same percentile-bootstrap algorithm as _bootstrap_delta_ci, kept
+    # in std-lib so we don't hard-require numpy from this module.
+    means: list[float] = []
+    for _ in range(n_iter):
+        idx = [rng.randint(0, n - 1) for _ in range(n)]
+        means.append(sum(vals[i] for i in idx) / n)
+    means.sort()
+    return {
+        "rate": round(p, 4),
+        "ci_low": round(means[int(n_iter * 0.025)], 4),
+        "ci_high": round(means[min(n_iter - 1, int(n_iter * 0.975))], 4),
+        "n": n,
+    }
+
+
+def paired_delta(
+    rows: list[dict],
+    cond_a: str,
+    cond_b: str,
+    *,
+    metric: str = "security",
+    filter_clarified: bool = True,
+    n_iter: int = DEFAULT_BOOTSTRAP_N,
+    seed: int = BOOTSTRAP_SEED,
+) -> dict:
+    """Paired bootstrap CI + exact McNemar for ``mean(a - b)``.
+
+    Public wrapper around :func:`_bootstrap_delta_ci` that takes raw
+    result rows and condition keys. Builds pairs by reading each row's
+    metric value for both conditions, then delegates to the existing
+    bootstrap implementation.
+
+    Parameters
+    ----------
+    rows : list of result records.
+    cond_a, cond_b : condition keys.
+    metric : ``"security"`` or ``"utility"``.
+    filter_clarified : if True (default), only include rows where the
+        agent called ``ask_user`` in Phase 1 (i.e. the clarification
+        sub-population). Required for state-effect deltas like A1/A2/A4
+        where one of the conditions is a ``clarif_*`` and is skipped
+        when the agent never asked. Pass ``False`` for pure exec-vs-exec
+        deltas (C1/C2/C3) where every group has both values.
+    n_iter, seed : passed to :func:`_bootstrap_delta_ci`.
+
+    Returns
+    -------
+    Same dict shape as :func:`_bootstrap_delta_ci`:
+        delta, ci_low, ci_high, n, p_mcnemar.
+    """
+    getter = get_security if metric == "security" else get_utility
+    pairs: list[tuple[int, int]] = []
+    for r in rows:
+        if filter_clarified and not r.get("clarification", {}).get("ask_user_called"):
+            continue
+        va = getter(r, cond_a, skipped_as=None)
+        vb = getter(r, cond_b, skipped_as=None)
+        if va is None or vb is None:
+            continue
+        pairs.append((int(bool(va)), int(bool(vb))))
+    return _bootstrap_delta_ci(pairs, n_iter=n_iter, seed=seed)
+
+
+def sig_marker(p: float | None) -> str:
+    """Render a McNemar p-value as a star annotation.
+
+    Conventions: *** p<0.001, ** p<0.01, * p<0.05. Empty string for
+    p>=0.05 or ``None`` (insufficient discordant pairs).
+    """
+    if p is None:
+        return ""
+    if p < 0.001:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Rule-based trace metrics (zero-cost, attacker-target matching)
 # ---------------------------------------------------------------------------
 
@@ -388,35 +531,66 @@ def _is_skipped(result: dict, cond: str) -> bool:
     return bool(c.get("skipped", False))
 
 
-def _get_util(result: dict, cond: str) -> int:
-    """Get 0/1 utility for condition. Skipped → 0. clarif_user uses utility_max."""
-    c = result.get(cond, {})
-    if not c or c.get("skipped"):
-        return 0
-    if cond == "clarif_user":
-        return int(bool(c.get("utility_max", False)))
-    return int(bool(c.get("utility", False)))
+def get_utility(result: dict, cond: str, *, skipped_as: int | None = 0):
+    """Get utility for condition.
 
+    ``clarif_user`` uses ``utility_max`` (binary aggregation across
+    HR/GS/CP variants); other conditions use the plain ``utility``
+    field. ``None`` from the model (rare) is treated as missing.
 
-def _get_sec(result: dict, cond: str) -> int:
-    """Get 0/1 security (attack-success). Skipped → 0. clarif_user uses security_max.
+    skipped_as : controls how skipped conditions and missing fields are
+        scored.
 
-    The ``security`` field is ``None`` for benign conditions
-    (``exec_benign``, ``clarif_benign``) — there is no attack to
-    score. None → 0. This function is only called from ASR
-    aggregation which iterates attack conditions only, but the None
-    handling is kept defensive in case a caller passes a benign cond.
+        * ``0`` (default, used by :func:`aggregate`) — treats skipped
+          and missing as failure. Returns ``int`` 0/1. Denominator
+          remains the full ``n_groups``.
+        * ``None`` (used by per-condition plotting) — treats skipped
+          and missing as not-applicable. Returns ``bool`` or ``None``.
+          Excludes such rows from rate denominators.
     """
     c = result.get(cond, {})
     if not c or c.get("skipped"):
-        return 0
-    if cond == "clarif_user":
-        v = c.get("security_max")
-    else:
-        v = c.get("security")
+        return skipped_as
+    field = "utility_max" if cond == "clarif_user" else "utility"
+    v = c.get(field)
     if v is None:
-        return 0
-    return int(bool(v))
+        return skipped_as
+    return int(bool(v)) if skipped_as is not None else bool(v)
+
+
+def get_security(result: dict, cond: str, *, skipped_as: int | None = 0):
+    """Get security (attack-success indicator) for condition.
+
+    ``clarif_user`` uses ``security_max`` (binary aggregation across
+    HR/GS/CP variants); other conditions use the plain ``security``
+    field. The ``security`` field is ``None`` for benign conditions
+    (``exec_benign``, ``clarif_benign``) — there is no attack to
+    score; ``None`` is treated as missing.
+
+    skipped_as : same semantics as :func:`get_utility`.
+        ``0`` for aggregate-friendly numeric output that includes
+        skipped/missing in the denominator as failure; ``None`` for
+        plot-friendly "exclude from denominator" output.
+    """
+    c = result.get(cond, {})
+    if not c or c.get("skipped"):
+        return skipped_as
+    field = "security_max" if cond == "clarif_user" else "security"
+    v = c.get(field)
+    if v is None:
+        return skipped_as
+    return int(bool(v)) if skipped_as is not None else bool(v)
+
+
+# Backward-compat aliases — internal callers in this module still use
+# the underscore names. New callers should use the public versions
+# above with explicit ``skipped_as``.
+def _get_util(result: dict, cond: str) -> int:
+    return get_utility(result, cond, skipped_as=0)
+
+
+def _get_sec(result: dict, cond: str) -> int:
+    return get_security(result, cond, skipped_as=0)
 
 
 def _get_clarif_user_mean(result: dict, field: str) -> float:
