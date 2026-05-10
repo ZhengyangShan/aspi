@@ -430,13 +430,6 @@ replace the benign task or are merged into the active task context.
 | `--bootstrap-n N` | Number of bootstrap resamples per delta (default `1000`). |
 | `--plot-dir DIR` | Output directory for PNGs. |
 
-
-### `scripts/export_csv.py` — Dataset review
-
-```bash
-python scripts/export_csv.py --input data/aspi_*.jsonl --output review.csv
-```
-
 ---
 
 ## Evaluation Architecture
