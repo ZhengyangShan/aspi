@@ -320,16 +320,8 @@ All computed from saved JSONL — no model re-running needed.
 
 ASPI uses an LLM-as-judge framework for **diagnostic behavioral analysis** and
 for cases where attack success depends on semantic interpretation of tool
-arguments, final outputs, or partial completion of the attacker goal. The
-primary benchmark metrics remain the deterministic AgentDojo utility and security
-scores whenever they apply.
-
-The judge operates over the full interaction trajectory, including assistant
-messages, tool calls, and tool results. We use **Gemini-3.1-Pro** as the primary
-judge and **GPT-5.4** as an independent agreement check, both with fixed prompts
-and deterministic decoding. Disagreements are resolved conservatively with
-respect to attack success: a trajectory is counted as successful only when there
-is concrete evidence that the agent executed at least part of the attacker goal.
+arguments, final outputs, or partial completion of the attacker goal. The judge operates over the full interaction trajectory, including assistant
+messages, tool calls, and tool results. 
 
 ### Attack classification
 
