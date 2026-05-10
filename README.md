@@ -173,6 +173,60 @@ python scripts/run_eval.py \
 
 **Output:** `results/eval/aspi_eval_{model}.jsonl`
 
+
+### Step 3: LLM Judge
+
+Annotates each result with richer attack/utility classifications, including the reasoning-acknowledgement field when hidden CoT is present.
+
+```bash
+python scripts/run_judge.py results/eval/aspi_eval_anthropic_claude-sonnet-4-6.jsonl \
+    --model openai/gpt-4o-mini-2024-07-18 --backend litellm --workers 4
+```
+
+**Output:** `results/judged/{stem}_judged.jsonl`
+
+
+### Step 4: Analysis
+
+```bash
+
+# Sumary table without LLM judge results
+python scripts/analyze.py \
+    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
+    --add "Gemini-Flash-Lite" results/judged/aspi_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
+    --summary \
+    --plot all
+
+# Summary table (all models)
+python scripts/analyze.py \
+    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
+    --add "Gemini-Flash-Lite" results/judged/agentdojo_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
+    --summary
+
+# Detailed view for one model
+python scripts/analyze.py \
+    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
+    --detail "GPT-4o"
+
+# Trace metrics (attempted vs succeeded)
+python scripts/analyze.py \
+    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
+    --add "Gemini-Flash-Lite" results/judged/aspi_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
+    --trace
+
+# Generate all plots
+python scripts/analyze.py \
+    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
+    --add "Gemini-Flash-Lite" results/judged/aspi_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
+    --plot all
+
+
+```
+
+**Output:** `results/plots/*.png` + terminal tables
+
+
+
 ## Defenses
 
 ASPI also includes two lightweight defenses, implemented in
@@ -242,56 +296,6 @@ These audits are important because defense failures can otherwise be silent. In
 particular, classifier load failure or malformed tool-filter replies should be
 visible in the saved outputs.
 
-### Step 3: LLM Judge
-
-Annotates each result with richer attack/utility classifications, including the reasoning-acknowledgement field when hidden CoT is present.
-
-```bash
-python scripts/run_judge.py results/eval/aspi_eval_anthropic_claude-sonnet-4-6.jsonl \
-    --model openai/gpt-4o-mini-2024-07-18 --backend litellm --workers 4
-```
-
-**Output:** `results/judged/{stem}_judged.jsonl`
-
-
-### Step 4: Analysis
-
-```bash
-
-# Sumary table without LLM judge results
-python scripts/analyze.py \
-    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
-    --add "Gemini-Flash-Lite" results/judged/aspi_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
-    --summary \
-    --plot all
-
-# Summary table (all models)
-python scripts/analyze.py \
-    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
-    --add "Gemini-Flash-Lite" results/judged/agentdojo_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
-    --summary
-
-# Detailed view for one model
-python scripts/analyze.py \
-    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
-    --detail "GPT-4o"
-
-# Trace metrics (attempted vs succeeded)
-python scripts/analyze.py \
-    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
-    --add "Gemini-Flash-Lite" results/judged/aspi_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
-    --trace
-
-# Generate all plots
-python scripts/analyze.py \
-    --add "GPT-4o" results/judged/aspi_eval_gpt-4o-2024-05-13_judged.jsonl \
-    --add "Gemini-Flash-Lite" results/judged/aspi_eval_gemini_gemini-2.5-flash-lite_judged.jsonl \
-    --plot all
-
-
-```
-
-**Output:** `results/plots/*.png` + terminal tables
 
 ---
 
