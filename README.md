@@ -88,15 +88,17 @@ ai-safety/
 │   │   ├── pipeline.py         #     parallel run_pipeline
 │   │   └── quality.py          #     QC-1..QC-7 checks
 │   │   
-│   └── eval/                   #   evaluation, judge, simulator, analysis
-│       ├── runner.py           #     8-condition agent runner
-│       ├── litellm_element.py  #     direct litellm.completion() pipeline element + reasoning capture
-│       ├── prompt_guard.py     #     ASPI-tuned prompt guard (user+tool scanning, chunk filtering)
-│       ├── tool_filter.py      #     ASPI-tuned tool filter (trusted-task, ask_user-aware)
-│       ├── metrics.py          #     aggregate(): rates, 13 paired deltas, bootstrap CI + McNemar
-│       ├── judge.py            #     ASPIJudge LLM-as-judge (incl. reasoning analysis)
-│       ├── simulator.py        #     UserSimulator + ask_user tool
-│       └── analyze.py          #     tables + plots CLI
+│   ├── defenses/              #   ASPI-adapted defenses
+│   │   ├── prompt_guard.py    #     scans user+tool messages, chunk-level filtering
+│   │   └── tool_filter.py     #     trusted-task, ask_user-aware tool pruning
+│   │
+│   └── eval/                  #   evaluation, judge, simulator, analysis
+│       ├── runner.py          #     8-condition agent runner
+│       ├── litellm_element.py #     direct litellm.completion() pipeline element + reasoning capture
+│       ├── metrics.py         #     aggregate(): rates, 13 paired deltas, bootstrap CI + McNemar
+│       ├── judge.py           #     ASPIJudge LLM-as-judge (incl. reasoning analysis)
+│       ├── simulator.py       #     UserSimulator + ask_user tool
+│       └── analyze.py         #     tables + plots CLI
 │
 ├── scripts/                    # thin CLI wrappers (run from repo root)
 │   ├── build_dataset.py        #   → aspi.dataset.pipeline.main
@@ -173,8 +175,9 @@ python scripts/run_eval.py \
 
 ## Defenses
 
-ASPI also includes two lightweight defenses adapted specifically for the
-clarification-time setting. These are not the main contribution of the
+ASPI also includes two lightweight defenses, implemented in
+`src/aspi/defenses/`, and adapted specifically for the clarification-time
+setting. These are not the main contribution of the
 benchmark, but they provide a controlled test of whether existing mitigation
 ideas remain effective when attacks are delivered during clarification.
 
