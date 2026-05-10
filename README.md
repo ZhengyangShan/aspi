@@ -91,6 +91,8 @@ ai-safety/
 │   └── eval/                   #   evaluation, judge, simulator, analysis
 │       ├── runner.py           #     8-condition agent runner
 │       ├── litellm_element.py  #     direct litellm.completion() pipeline element + reasoning capture
+│       ├── prompt_guard.py     #     ASPI-tuned prompt guard (user+tool scanning, chunk filtering)
+│       ├── tool_filter.py      #     ASPI-tuned tool filter (trusted-task, ask_user-aware)
 │       ├── metrics.py          #     aggregate(): rates, 13 paired deltas, bootstrap CI + McNemar
 │       ├── judge.py            #     ASPIJudge LLM-as-judge (incl. reasoning analysis)
 │       ├── simulator.py        #     UserSimulator + ask_user tool
@@ -148,7 +150,10 @@ python scripts/build_dataset.py --model gemini/gemini-3.1-pro-preview --suite al
 
 ### Step 2: Evaluation (8 conditions)
 
-Runs the agent through all 8 conditions per group and records utility / security scores plus full reasoning traces.
+Runs the agent through all 8 conditions per group and records utility / security
+scores plus full reasoning traces. Defense evaluations reuse the same pipeline
+with an additional defense module inserted before or at the final action
+boundary.
 
 ```bash
 # Sonnet 4.6 with reasoning auto-on, all 4 suites, 4 parallel workers
@@ -165,6 +170,74 @@ python scripts/run_eval.py \
 `--backend litellm` is the default; `--reasoning auto` is the default. `auto` picks per-model defaults from the 6-family dispatch table. Pass `--reasoning off` for an ablation baseline.
 
 **Output:** `results/eval/aspi_eval_{model}.jsonl`
+
+## Defenses
+
+ASPI also includes two lightweight defenses adapted specifically for the
+clarification-time setting. These are not the main contribution of the
+benchmark, but they provide a controlled test of whether existing mitigation
+ideas remain effective when attacks are delivered during clarification.
+
+### Prompt guard
+
+The prompt guard is a channel-agnostic prompt-injection detector that scans both
+`user` and `tool` messages before each LLM call. This is important in ASPI
+because attacks can arrive either through ordinary tool outputs or through the
+user's answer to a clarification question. Unlike tool-output-only defenses, it
+covers both execution-state and clarification-state user-channel attacks.
+
+Key ASPI-specific behaviors:
+
+- **Channel coverage**: scans both `tool` and `user` messages.
+- **Chunk-level sanitization**: splits text on blank lines and replaces only the
+  suspicious chunks, so benign clarification content can be preserved when an
+  attack is appended to an otherwise useful answer.
+- **Correct user-turn handling**: counts user turns across the full history
+  before applying the checked shortcut, avoiding continuation-time mistakes in
+  identifying which user turn is being scanned.
+- **Hard failure on load errors**: classifier load failure aborts the run rather
+  than silently degrading to a no-op.
+- **Auditing**: attaches `_aspi_prompt_guard_audit` to the runtime, recording
+  classifier load state, filtered user/tool counts, and classification-failure
+  statistics.
+
+Default classifier:
+`protectai/deberta-v3-base-prompt-injection-v2`
+
+### Tool filter
+
+The tool filter prunes the available tool set before the next agent action, but
+is adapted for ASPI so that clarification remains possible.
+
+Key ASPI-specific behaviors:
+
+- **`ask_user` is always preserved**: clarification should not be disabled by
+  the defense.
+- **Trusted-task sourcing**: the filter reads a trusted task description from
+  `extra_args["aspi_trusted_task"]` or `runtime._aspi_trusted_task` rather than
+  relying on the potentially poisoned live user message.
+- **Last-safe-boundary execution**: the filter is applied only at the last safe
+  boundary before the agent acts on the condition-specific context.
+- **Once-per-task idempotency**: the filter is stored and disarmed on the
+  runtime, so it fires exactly once per task even across continuations.
+- **Strict JSON decision rule**: pruning happens only if the filter model
+  returns valid JSON of the form `{"keep_tools": [...]}`. Otherwise, the defense
+  falls back to keeping all original tools and records
+  `fallback_kept_all=True` in the audit.
+
+### Defense audits
+
+When a defense is enabled, the runtime may attach audit metadata to each result:
+
+- `_aspi_prompt_guard_audit`: prompt-guard audit snapshot including model id,
+  load status, filtered user/tool counts, and classification-failure counts.
+- `_aspi_tool_filter_audit`: tool-filter audit snapshot including trusted-task
+  source, filter reply text, parser type, kept/dropped tools, and whether the
+  run fell back to keeping all tools.
+
+These audits are important because defense failures can otherwise be silent. In
+particular, classifier load failure or malformed tool-filter replies should be
+visible in the saved outputs.
 
 ### Step 3: LLM Judge
 
