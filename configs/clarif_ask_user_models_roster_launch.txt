@@ -1,0 +1,31 @@
+# Launcher list for the M (third_party) full run = the 21-model roster
+# (configs/clarif_ask_user_models_roster.txt) MINUS gemini-4-carbon.
+# Carbon is run SEPARATELY with --workers higher + --timeout 200 because its
+# proxy endpoint tail-latency stalled the A batch when run without a per-call
+# cap. Keeping carbon out of the xargs pool stops it squatting a slot.
+
+# ---- Tier 1 ----
+anthropic/claude-opus-5-5
+anthropic/claude-fable-5-2
+openai/gpt-6-astra
+xai/grok-4.7
+meta_ai/muse-wonder-1.0
+fireworks_ai/accounts/fireworks/models/kimi-k3p1-pro
+fireworks_ai/qwen3p8-2p4t-a95b
+fireworks_ai/accounts/fireworks/models/glm-5p3
+
+# ---- Tier 2 ----
+gemini/gemini-4-hydrogen
+openai/gpt-6.1-sol
+fireworks_ai/muse-spark-open
+meta_ai/muse-ember-1.0
+
+# ---- Tier 3 ----
+anthropic/claude-sonnet-5-5
+fireworks_ai/minimax-m3p1-flash
+fireworks_ai/deepseek-v4p1-flash-1017
+fireworks_ai/glm-5p3-flash
+gemini/gemini-3.8-flash
+anthropic/claude-haiku-5-5
+gemini/gemini-4-argon
+openai/gpt-6.1-terra

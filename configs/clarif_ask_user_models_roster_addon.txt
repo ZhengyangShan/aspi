@@ -1,0 +1,25 @@
+# ASPI clarif_ask_user — roster add-on (models from the authoritative tier
+# roster not yet in the A run). Verified reachable via 1-token/64-token probes
+# 2026-11-19 (litellm path + _coerce_model_for_proxy). Tier order preserved.
+# Launch with --resume against the default OUT (results/clarif_ask_user) so these
+# are ADDED to the A run without re-running the 18 finished models.
+#
+# NOT included (can't run as-is):
+#   Beam 1.0            fireworks_ai/deployed/wks7i64j   -> "no healthy upstream" (deployment down)
+#   Nemotron 3.5 SuperVL ai-infra-nemotron/...           -> 401, key has no access
+#   Inkling 2 Small     <no id>                           -> no model id yet
+#   Mistral Large 4     mistral/mistral-large-4           -> litellm rejects thinking-block content (list)
+
+# ---- Tier 1 ----
+fireworks_ai/qwen3p8-2p4t-a95b
+
+# ---- Tier 2 ----
+gemini/gemini-4-hydrogen
+fireworks_ai/muse-spark-open
+meta_ai/muse-ember-1.0
+
+# ---- Tier 3 ----
+fireworks_ai/minimax-m3p1-flash
+fireworks_ai/deepseek-v4p1-flash-1017
+fireworks_ai/glm-5p3-flash
+gemini/gemini-3.8-flash

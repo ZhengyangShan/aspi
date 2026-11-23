@@ -1,0 +1,13 @@
+# Secrets
+.env
+
+# macOS Finder metadata
+.DS_Store
+
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+
+# Experiment outputs (large trajectory dirs + generated report tables, ~2 GB)
+results/

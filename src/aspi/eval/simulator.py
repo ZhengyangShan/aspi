@@ -52,7 +52,12 @@ import os
 import warnings
 
 import openai
-from tenacity import retry, stop_after_attempt, wait_random_exponential
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_random_exponential,
+)
 
 from agentdojo.functions_runtime import Function, make_function
 
@@ -147,10 +152,17 @@ class UserSimulator:
         else:
             raise ValueError(f"Unknown backend: {backend!r}")
 
+    # Transient failures (rate limits on a shared proxy key, timeouts,
+    # 5xx) are retried for a long time so the simulator rarely falls back
+    # to the pre-generated answer; 4xx request errors fail fast.
     @retry(
         wait=wait_random_exponential(min=1, max=60),
-        stop=stop_after_attempt(5),
+        stop=stop_after_attempt(30),
         reraise=True,
+        retry=retry_if_exception_type((
+            openai.RateLimitError, openai.APIConnectionError,
+            openai.APITimeoutError, openai.InternalServerError,
+        )),
     )
     def _call_llm(
         self,

@@ -28,6 +28,10 @@ from __future__ import annotations
 
 import json
 import logging
+import random
+import time
+import urllib.error
+import urllib.request
 from collections.abc import Sequence
 from typing import Any
 
@@ -124,7 +128,8 @@ def _coerce_model_for_proxy(model: str) -> str:
 
     # Providers the proxy serves with their full prefix preserved.
     PRESERVE = ("anthropic/", "fireworks_ai/", "bedrock/",
-                "mistral/", "xai/", "openrouter/")
+                "mistral/", "xai/", "openrouter/", "meta_ai/",
+                "azure_ai/")
     for prefix in PRESERVE:
         if model.startswith(prefix):
             return f"openai/{model}"
@@ -410,6 +415,176 @@ def _response_to_assistant_message(response: Any) -> ChatAssistantMessage:
     return out  # type: ignore[return-value]
 
 
+def _get(obj: Any, name: str) -> Any:
+    """Attribute-or-key access (litellm usage objects vary by version)."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _call_meta(response: Any, latency_s: float) -> dict[str, Any]:
+    """Per-call bookkeeping: stop reason, token usage, latency, cost.
+
+    Attached to each assistant message as ``llm_call`` so the eval can
+    report refusals / truncation (``finish_reason``) and actual token
+    spend. Cost fields are whatever LiteLLM or the proxy reported; they
+    are ``None`` when the model is missing from LiteLLM's price map.
+    """
+    try:
+        finish_reason = response.choices[0].finish_reason
+    except (AttributeError, IndexError):
+        finish_reason = None
+    usage = _get(response, "usage")
+    completion_details = _get(usage, "completion_tokens_details")
+    prompt_details = _get(usage, "prompt_tokens_details")
+    hidden = getattr(response, "_hidden_params", None) or {}
+    headers = hidden.get("additional_headers") or {}
+    proxy_cost = headers.get("llm_provider-x-litellm-response-cost")
+    try:
+        proxy_cost = float(proxy_cost) if proxy_cost is not None else None
+    except (TypeError, ValueError):
+        proxy_cost = None
+    # LiteLLM reports 0.0 (not None) for models missing from its price
+    # map, e.g. proxy routes like openai/anthropic/<model>. A zero cost on
+    # a call that produced tokens means "unknown", not "free".
+    litellm_cost = hidden.get("response_cost")
+    if not litellm_cost and (_get(usage, "completion_tokens") or 0) > 0:
+        litellm_cost = None
+    return {
+        "finish_reason": finish_reason,
+        "response_model": _get(response, "model"),
+        "prompt_tokens": _get(usage, "prompt_tokens"),
+        "completion_tokens": _get(usage, "completion_tokens"),
+        "reasoning_tokens": _get(completion_details, "reasoning_tokens"),
+        "cached_prompt_tokens": _get(prompt_details, "cached_tokens"),
+        "latency_s": round(latency_s, 3),
+        "litellm_cost_usd": litellm_cost,
+        "proxy_cost_usd": proxy_cost,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Raw-HTTP fallback transport
+# ---------------------------------------------------------------------------
+#
+# Some reasoning models (e.g. Mistral Magistral / mistral-large-4) return an
+# assistant ``content`` that is a LIST of provider blocks
+# (``[{"type":"thinking",...}, {"type":"text",...}]``). The installed LiteLLM
+# SDK (1.110.x) cannot deserialize that into its ChatCompletion object and
+# raises ``InternalServerError: ... Invalid response object`` — even though the
+# proxy returned a valid HTTP 200 payload with the full answer. There is no
+# newer litellm that fixes this and no request param that disables the blocks.
+#
+# ``ResponseParseError`` marks that specific failure. ``query()`` then re-issues
+# the SAME request over a plain HTTP POST to the proxy's OpenAI-compat endpoint
+# and parses the JSON here, flattening block-list content to text + reasoning.
+# This touches ONLY the transport for responses litellm can't parse; every
+# other model keeps the normal litellm path untouched.
+
+
+class ResponseParseError(Exception):
+    """litellm failed to deserialize an otherwise-valid proxy response
+    (block-list ``content`` -> 'Invalid response object'). Deterministic, so
+    it is non-retriable via litellm; it signals the raw-HTTP fallback."""
+
+
+def _flatten_blocklist_content(content: Any) -> tuple[str, str, list[dict]]:
+    """Return ``(text, thinking_text, thinking_blocks)`` from a message
+    ``content`` that is either a plain string or a provider block list."""
+    if content is None:
+        return "", "", []
+    if isinstance(content, str):
+        return content, "", []
+    texts: list[str] = []
+    thinks: list[str] = []
+    tblocks: list[dict] = []
+    for b in content:
+        if not isinstance(b, dict):
+            continue
+        btype = b.get("type")
+        if btype == "text":
+            texts.append(b.get("text") or "")
+        elif btype == "thinking":
+            tblocks.append(b)
+            th = b.get("thinking")
+            if isinstance(th, list):
+                th = "".join(x.get("text", "") for x in th if isinstance(x, dict))
+            if isinstance(th, str) and th:
+                thinks.append(th)
+    return "".join(texts), "\n".join(thinks), tblocks
+
+
+def _raw_json_to_assistant_message(data: dict) -> ChatAssistantMessage:
+    """Parse a raw proxy JSON response (OpenAI-compat) into AgentDojo's
+    ChatAssistantMessage, mirroring ``_response_to_assistant_message`` but
+    reading from a dict and flattening block-list content."""
+    choice = (data.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+
+    text, thinking, tblocks = _flatten_blocklist_content(msg.get("content"))
+    content_blocks: list[MessageContentBlock] | None = (
+        [text_content_block_from_string(text)] if text.strip() else None
+    )
+
+    tool_calls_out: list[FunctionCall] | None = None
+    raw_tcs = msg.get("tool_calls")
+    if raw_tcs:
+        tool_calls_out = []
+        for tc in raw_tcs:
+            fn = (tc or {}).get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except Exception as e:
+                logger.debug(f"raw tool_call arg parse failed: {e}")
+                args = {}
+            tool_calls_out.append(FunctionCall(
+                function=fn.get("name"), args=args, id=tc.get("id"),
+            ))
+
+    out: dict[str, Any] = {
+        "role": "assistant",
+        "content": content_blocks,
+        "tool_calls": tool_calls_out,
+    }
+
+    # reasoning: prefer an explicit top-level field, else the thinking blocks.
+    rc = msg.get("reasoning_content")
+    if not (isinstance(rc, str) and rc.strip()):
+        rc = thinking
+    if isinstance(rc, str) and rc.strip():
+        out["reasoning_content"] = rc
+    if tblocks:
+        out["thinking_blocks"] = tblocks
+    out["reasoning_source"] = "raw_fallback_blocklist"
+    return out  # type: ignore[return-value]
+
+
+def _raw_call_meta(data: dict, latency_s: float, cost_header: Any) -> dict[str, Any]:
+    """``_call_meta`` equivalent for a raw JSON response."""
+    choice = (data.get("choices") or [{}])[0]
+    usage = data.get("usage") or {}
+    cdet = usage.get("completion_tokens_details") or {}
+    pdet = usage.get("prompt_tokens_details") or {}
+    try:
+        proxy_cost = float(cost_header) if cost_header is not None else None
+    except (TypeError, ValueError):
+        proxy_cost = None
+    return {
+        "finish_reason": choice.get("finish_reason"),
+        "response_model": data.get("model"),
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+        "reasoning_tokens": cdet.get("reasoning_tokens"),
+        "cached_prompt_tokens": pdet.get("cached_tokens"),
+        "latency_s": round(latency_s, 3),
+        "litellm_cost_usd": None,
+        "proxy_cost_usd": proxy_cost,
+        "transport": "raw_fallback",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Pipeline element
 # ---------------------------------------------------------------------------
@@ -417,6 +592,7 @@ def _response_to_assistant_message(response: Any) -> ChatAssistantMessage:
 _NON_RETRIABLE = (
     litellm.BadRequestError,
     litellm.UnprocessableEntityError,
+    ResponseParseError,
 )
 
 
@@ -443,8 +619,10 @@ class LiteLLMPipelineElement(BasePipelineElement):
           - Qwen3 thinking: ``{"extra_body": {"enable_thinking": True}}``
         Resolved by ``runner._resolve_reasoning_kwargs`` based on the
         ``--reasoning`` flag.
-    temperature : float
-        Forwarded to every call. Default 0.0.
+    temperature : float | None
+        Forwarded to every call. Default 0.0. ``None`` sends no
+        temperature at all (provider default) — required for models
+        that reject sampling parameters (Claude 5 family, Kimi K3.x).
     api_base : str | None
         If set, overrides the default endpoint for the provider —
         useful when routing through a LiteLLM proxy.
@@ -460,27 +638,114 @@ class LiteLLMPipelineElement(BasePipelineElement):
         self,
         model: str,
         reasoning_kwargs: dict[str, Any] | None = None,
-        temperature: float = 0.0,
+        temperature: float | None = 0.0,
         api_base: str | None = None,
         api_key: str | None = None,
         extra_static_kwargs: dict[str, Any] | None = None,
+        tool_choice: str | None = "auto",
+        max_tokens: int | None = None,
+        timeout: float | None = None,
     ) -> None:
         self.model = model
         self.reasoning_kwargs = dict(reasoning_kwargs or {})
         self.temperature = temperature
+        # Per-call wall-clock cap (seconds). None = omit the field (litellm
+        # default ~600s). A tight value turns a pathological tail stall into a
+        # fast abort that the @retry wrapper re-issues; since litellm.Timeout is
+        # retriable, a stalled call is retried rather than blocking a worker slot
+        # for many minutes. Latency-tail mitigation, not a correctness knob.
+        self.timeout = timeout
+        # Explicit output cap sent on every call. None = omit the field
+        # (provider default). A generous value guarantees reasoning-heavy
+        # models can emit a full trajectory instead of being silently
+        # truncated by a low provider default. Every provider family in use
+        # accepts values up to at least 65536 (verified 2026-11-19).
+        self.max_tokens = max_tokens
+        # "auto" is every provider's default when tools are present;
+        # None omits the field (some routes reject it, e.g. Fireworks
+        # DeepSeek V4 Pro).
+        self.tool_choice = tool_choice
         self.api_base = api_base
         self.api_key = api_key
         self.extra_static_kwargs = dict(extra_static_kwargs or {})
 
-    # Retry wrapper matching AgentDojo's chat_completion_request policy.
+    # Rate limits (429) are waited out separately from other failures: a
+    # shared proxy key (e.g. 120 RPM across every model) throttles bursts
+    # that succeed a few seconds later, and giving up would turn a
+    # throttled call into a lost task.
+    MAX_RATE_LIMIT_RETRIES = 40
+
+    def _call(self, **kwargs: Any) -> Any:
+        rate_limited = 0
+        while True:
+            try:
+                return self._call_once(**kwargs)
+            except litellm.RateLimitError:
+                rate_limited += 1
+                if rate_limited > self.MAX_RATE_LIMIT_RETRIES:
+                    raise
+                time.sleep(min(60.0, 2.0 ** min(rate_limited, 6)) * random.uniform(0.5, 1.0))
+
+    # Retry wrapper matching AgentDojo's chat_completion_request policy
+    # for everything except rate limits (handled in _call above).
     @retry(
         wait=wait_random_exponential(multiplier=1, max=40),
         stop=stop_after_attempt(3),
         reraise=True,
-        retry=retry_if_not_exception_type(_NON_RETRIABLE),
+        retry=retry_if_not_exception_type(_NON_RETRIABLE + (litellm.RateLimitError,)),
     )
-    def _call(self, **kwargs: Any) -> Any:
-        return litellm.completion(**kwargs)
+    def _call_once(self, **kwargs: Any) -> Any:
+        try:
+            return litellm.completion(**kwargs)
+        except Exception as e:
+            # litellm could not deserialize an HTTP-200 proxy response
+            # (block-list content). Deterministic — hand off to the raw
+            # transport instead of retrying the same doomed parse.
+            if "Invalid response object" in str(e):
+                raise ResponseParseError(str(e)[:300]) from e
+            raise
+
+    def _raw_completion(self, call_kwargs: dict[str, Any]) -> tuple[dict, Any]:
+        """Re-issue ``call_kwargs`` as a plain HTTP POST to the proxy's
+        OpenAI-compat endpoint and return ``(json, cost_header)``. Used only
+        after a ``ResponseParseError``. Retries 429 / 5xx with backoff."""
+        base = (self.api_base or "").rstrip("/")
+        url = base + "/chat/completions"
+        m = call_kwargs["model"]
+        # Strip the SDK transport prefix; the proxy's model_group is the
+        # provider-prefixed handle (e.g. "mistral/mistral-large-4").
+        raw_model = m[len("openai/"):] if m.startswith("openai/") else m
+        body: dict[str, Any] = {"model": raw_model, "messages": call_kwargs["messages"]}
+        for k in ("temperature", "max_tokens", "tools", "tool_choice"):
+            if k in call_kwargs:
+                body[k] = call_kwargs[k]
+        eb = call_kwargs.get("extra_body")
+        if isinstance(eb, dict):
+            body.update(eb)
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        timeout = call_kwargs.get("timeout") or 600
+        payload = json.dumps(body).encode()
+
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    cost = resp.headers.get("x-litellm-response-cost")
+                    return json.loads(resp.read().decode()), cost
+            except urllib.error.HTTPError as e:
+                last_exc = e
+                if e.code == 429 or 500 <= e.code < 600:
+                    time.sleep(min(40.0, 2.0 ** attempt) * random.uniform(0.5, 1.0))
+                    continue
+                raise
+            except Exception as e:  # URLError / timeout / JSON decode
+                last_exc = e
+                time.sleep(min(40.0, 2.0 ** attempt) * random.uniform(0.5, 1.0))
+        assert last_exc is not None
+        raise last_exc
 
     def query(
         self,
@@ -506,18 +771,25 @@ class LiteLLMPipelineElement(BasePipelineElement):
         # / Qwen3 / DeepSeek accept temp=1.0 with reasoning on. So: force 1.0
         # whenever reasoning_kwargs are present — safe universally, required
         # for Anthropic.
+        # temperature=None means "send nothing" (provider default).
         effective_temperature = self.temperature
-        if self.reasoning_kwargs:
+        if self.reasoning_kwargs and effective_temperature is not None:
             effective_temperature = 1.0
 
         call_kwargs: dict[str, Any] = {
             "model": effective_model,
             "messages": openai_messages,
-            "temperature": effective_temperature,
         }
+        if effective_temperature is not None:
+            call_kwargs["temperature"] = effective_temperature
+        if self.max_tokens is not None:
+            call_kwargs["max_tokens"] = self.max_tokens
+        if self.timeout is not None:
+            call_kwargs["timeout"] = self.timeout
         if openai_tools:
             call_kwargs["tools"] = openai_tools
-            call_kwargs["tool_choice"] = "auto"
+            if self.tool_choice is not None:
+                call_kwargs["tool_choice"] = self.tool_choice
         if self.api_base:
             call_kwargs["api_base"] = self.api_base
         if self.api_key:
@@ -537,7 +809,18 @@ class LiteLLMPipelineElement(BasePipelineElement):
         _merge(call_kwargs, self.extra_static_kwargs)
         _merge(call_kwargs, self.reasoning_kwargs)
 
-        response = self._call(**call_kwargs)
-        output = _response_to_assistant_message(response)
+        t0 = time.monotonic()
+        try:
+            response = self._call(**call_kwargs)
+        except ResponseParseError:
+            # litellm couldn't parse an HTTP-200 response (block-list
+            # content). Re-issue over raw HTTP and parse the JSON ourselves.
+            data, cost_header = self._raw_completion(call_kwargs)
+            latency = time.monotonic() - t0
+            output = _raw_json_to_assistant_message(data)
+            output["llm_call"] = _raw_call_meta(data, latency, cost_header)
+        else:
+            output = _response_to_assistant_message(response)
+            output["llm_call"] = _call_meta(response, time.monotonic() - t0)
         messages = [*messages, output]
         return query, runtime, env, messages, extra_args

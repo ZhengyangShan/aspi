@@ -1,0 +1,51 @@
+# ASPI clarif_ask_user — tiered model list (run order: Tier 1 -> 2 -> 3)
+# Verified 2026-11-18 against the LiteLLM proxy
+#   (proxy catalog + code coercion + live 1-token probe via the litellm path).
+# The launcher skips lines starting with '#'. Do NOT put inline comments on a
+# model line — the whole line is passed as --model. Blocked/pending models are
+# commented out below with the reason; uncomment/fix once resolved.
+#
+# Fireworks note: Kimi, DeepSeek V4.1 Flash and GLM-5.3 use the full
+#   accounts/fireworks/models/... path (the short alias is not in the catalog).
+
+# ================= Tier 1 =================
+anthropic/claude-opus-5-5
+anthropic/claude-fable-5-2
+gemini/gemini-4-carbon
+# HOLD: GPT-6 Astra — may be swapped for gpt-6.2-astra
+openai/gpt-6-astra
+xai/grok-4.7
+meta_ai/muse-wonder-1.0
+fireworks_ai/accounts/fireworks/models/kimi-k3p1-pro
+# BLOCKED: Nemotron 3.5 Super VL — 401, key has no access to the
+#   ai-infra-nemotron/ route (need correct handle or key grant)
+# ai-infra-nemotron/nemotron-3-5-super-vl
+fireworks_ai/qwen3p8-2p4t-a95b
+fireworks_ai/accounts/fireworks/models/glm-5p3
+# Beam 1.0 — dedicated deployment, first call may cold-start (resume re-runs it)
+fireworks_ai/deployed/wks7i64j
+
+# ================= Tier 2 =================
+# BLOCKED: Inkling 2 Small — no model id yet
+# <inkling-2-small-id>
+gemini/gemini-4-hydrogen
+# Mistral Large 4 — returns thinking blocks in `content` (list) that litellm
+#   cannot deserialize; handled by the raw-transport fallback in
+#   litellm_element.py (ResponseParseError -> raw OpenAI-compat POST), so it runs.
+mistral/mistral-large-4
+# HOLD: GPT-6.1 Sol — may be swapped for gpt-6.2-sol
+openai/gpt-6.1-sol
+fireworks_ai/muse-spark-open
+meta_ai/muse-ember-1.0
+
+# ================= Tier 3 =================
+anthropic/claude-sonnet-5-5
+# MiniMax M3.1 Flash — use the SHORT handle (the accounts/.../minimax-m3p1-flash
+#   path 404s; short handle verified 2026-11-18, content=str, finish=stop).
+fireworks_ai/minimax-m3p1-flash
+fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash-1017
+fireworks_ai/glm-5p3-flash
+gemini/gemini-3.8-flash
+anthropic/claude-haiku-5-5
+gemini/gemini-4-argon
+openai/gpt-6.1-terra

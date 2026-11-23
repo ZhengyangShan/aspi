@@ -1,0 +1,35 @@
+# ASPI clarif_ask_user — canonical roster (21 runnable models from the
+# authoritative MTF tier roster). Proxy IDs are the exact forms proven to
+# work in the A (important_instructions) run. Tier order preserved.
+# 4 roster models are NOT runnable and are omitted:
+#   Nemotron 3.5 Super VL  ai-infra-nemotron/...            -> 401, key has no access
+#   Beam 1.0               fireworks_ai/deployed/wks7i64j   -> no healthy upstream
+#   Inkling 2 Small        <no id>                          -> no model id
+#   Mistral Large 4        mistral/mistral-large-4          -> litellm rejects thinking-block schema
+
+# ---- Tier 1 ----
+anthropic/claude-opus-5-5
+anthropic/claude-fable-5-2
+gemini/gemini-4-carbon
+openai/gpt-6-astra
+xai/grok-4.7
+meta_ai/muse-wonder-1.0
+fireworks_ai/accounts/fireworks/models/kimi-k3p1-pro
+fireworks_ai/qwen3p8-2p4t-a95b
+fireworks_ai/accounts/fireworks/models/glm-5p3
+
+# ---- Tier 2 ----
+gemini/gemini-4-hydrogen
+openai/gpt-6.1-sol
+fireworks_ai/muse-spark-open
+meta_ai/muse-ember-1.0
+
+# ---- Tier 3 ----
+anthropic/claude-sonnet-5-5
+fireworks_ai/minimax-m3p1-flash
+fireworks_ai/deepseek-v4p1-flash-1017
+fireworks_ai/glm-5p3-flash
+gemini/gemini-3.8-flash
+anthropic/claude-haiku-5-5
+gemini/gemini-4-argon
+openai/gpt-6.1-terra
