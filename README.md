@@ -1,5 +1,7 @@
 # ASPI Benchmark — Ambiguous State Prompt Injection
 
+[**paper**](https://arxiv.org/abs/2605.17324) &nbsp;·&nbsp; [**project page**](https://labs.scale.com/papers/aspi)
+
 A benchmark for measuring LLM agent vulnerability during clarification states with a 4-condition design to test whether agents become more susceptible to prompt injection when they enter a clarification-seeking state.
 
 ## Key Idea
@@ -232,13 +234,6 @@ python scripts/run_clarif_ask_user.py --model anthropic/claude-opus-5-5 \
 
 Results for a non-default `--attack` land in a suffixed folder, e.g.
 `results/clarif_ask_user_direct/`, so runs never overwrite each other.
-
-> **Transport note.** All models are routed through a LiteLLM proxy. A few
-> reasoning models (e.g. Mistral Large) return their reasoning as a list of
-> content blocks that the pinned `litellm` cannot deserialize; `litellm_element.py`
-> detects this and transparently falls back to a raw OpenAI-compatible POST, so
-> those models run without a library upgrade. The path taken is recorded per call
-> in `llm_calls[].transport` (`raw_fallback` when the fallback fired).
 
 ### Step 3: LLM Judge
 
